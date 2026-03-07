@@ -55,7 +55,9 @@ export class FileOperationsHandler {
     const operations: FileOperation[] = [];
 
     // CREATE_FILE
-    const createRegex = /<<<\s*CREATE_FILE\s+path="([^"]+)"\s*>>>([\s\S]*?)<<<\s*END_FILE\s*>>>/g;
+    // Allows 2+ brackets: >> or >>>
+    // Allows missing END_FILE (matches to end of string or next block)
+    const createRegex = /<<<\s*CREATE_FILE\s+path="([^"]+)"\s*>{2,}([\s\S]*?)(?:<<<\s*END_FILE\s*>{2,}|$|(?=<<<\s*(?:CREATE|EDIT|DELETE|EXECUTE)))/gi;
     let match;
     while ((match = createRegex.exec(response)) !== null) {
       operations.push({
@@ -67,7 +69,7 @@ export class FileOperationsHandler {
     }
 
     // EDIT_FILE
-    const editRegex = /<<<\s*EDIT_FILE\s+path="([^"]+)"\s*>>>([\s\S]*?)<<<\s*END_FILE\s*>>>/g;
+    const editRegex = /<<<\s*EDIT_FILE\s+path="([^"]+)"\s*>{2,}([\s\S]*?)(?:<<<\s*END_FILE\s*>{2,}|$|(?=<<<\s*(?:CREATE|EDIT|DELETE|EXECUTE)))/gi;
     while ((match = editRegex.exec(response)) !== null) {
       operations.push({
         type: 'edit',
@@ -78,7 +80,7 @@ export class FileOperationsHandler {
     }
 
     // DELETE_FILE
-    const deleteRegex = /<<<\s*DELETE_FILE\s+path="([^"]+)"\s*\/?\s*>>>/g;
+    const deleteRegex = /<<<\s*DELETE_FILE\s+path="([^"]+)"\s*\/?\s*>{2,}/gi;
     while ((match = deleteRegex.exec(response)) !== null) {
       operations.push({
         type: 'delete',
@@ -88,7 +90,7 @@ export class FileOperationsHandler {
     }
 
     // EXECUTE
-    const execRegex = /<<<\s*EXECUTE\s+command="([^"]+)"\s*\/?\s*>>>/g;
+    const execRegex = /<<<\s*EXECUTE\s+command="([^"]+)"\s*\/?\s*>{2,}/gi;
     while ((match = execRegex.exec(response)) !== null) {
       operations.push({
         type: 'execute',
@@ -97,7 +99,114 @@ export class FileOperationsHandler {
       });
     }
 
+    // Fallback: if no operations found but code blocks with file paths exist
+    if (operations.length === 0) {
+      operations.push(...this.extractFromCodeBlocks(response));
+    }
+
     return operations;
+  }
+
+  /**
+   * Fallback: extracts file operations from markdown code blocks
+   * where the first line or the language block contains a file path.
+   * Format: ```typescript:src/file.ts
+   * Or format: ```typescript src/file.ts
+   */
+  private extractFromCodeBlocks(response: string): FileOperation[] {
+    const operations: FileOperation[] = [];
+    const codeBlockRegex = /```[\w-]*[:\s]+([a-zA-Z0-9_\-\./\\]+\.[a-zA-Z0-9]+)\s*\n([\s\S]*?)```/g;
+
+    let match;
+    while ((match = codeBlockRegex.exec(response)) !== null) {
+      const filePath = match[1].trim();
+      const content = match[2].trim();
+
+      operations.push({
+        // Defaulting to 'edit', executeDirect will decide to create if it doesn't exist
+        type: 'edit',
+        filePath,
+        content,
+        description: `Редактировать/Создать файл: ${filePath}`,
+      });
+    }
+
+    return operations;
+  }
+
+  /**
+   * Выполняет операцию напрямую БЕЗ дополнительного окна подтверждения VS Code.
+   * Используется, когда пользователь уже подтвердил действие кнопкой "Approve" в чате.
+   */
+  async executeDirect(operation: FileOperation): Promise<OperationResult> {
+    switch (operation.type) {
+      case 'create':
+      case 'edit':
+        return this.createOrEditFileDirect(operation);
+      case 'delete':
+        return this.deleteFileDirect(operation);
+      case 'execute':
+        // Для терминала пока оставляем запуск как есть
+        return this.executeCommandWithApproval(operation);
+      default:
+        return { success: false, message: 'Неизвестный тип операции' };
+    }
+  }
+
+  private async createOrEditFileDirect(op: FileOperation): Promise<OperationResult> {
+    if (!op.filePath || !op.content) {
+      return { success: false, message: 'Не указан путь или содержимое файла' };
+    }
+
+    const rootPath = this.getWorkspaceRoot();
+    if (!rootPath) {
+      return { success: false, message: 'Рабочая папка не открыта' };
+    }
+
+    const fullPath = path.join(rootPath, op.filePath);
+    const exists = fs.existsSync(fullPath);
+
+    try {
+      const dir = path.dirname(fullPath);
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+      fs.writeFileSync(fullPath, op.content, 'utf-8');
+
+      // Открываем файл
+      const doc = await vscode.workspace.openTextDocument(fullPath);
+      await vscode.window.showTextDocument(doc);
+
+      return { success: true, message: `Файл ${exists ? 'отредактирован' : 'создан'}: ${op.filePath}` };
+    } catch (err: unknown) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      return { success: false, message: `Ошибка: ${errMsg}` };
+    }
+  }
+
+  private async deleteFileDirect(op: FileOperation): Promise<OperationResult> {
+    if (!op.filePath) {
+      return { success: false, message: 'Не указан путь файла' };
+    }
+
+    const rootPath = this.getWorkspaceRoot();
+    if (!rootPath) {
+      return { success: false, message: 'Рабочая папка не открыта' };
+    }
+
+    const fullPath = path.join(rootPath, op.filePath);
+
+    if (!fs.existsSync(fullPath)) {
+      return { success: false, message: `Файл не найден: ${op.filePath}` };
+    }
+
+    try {
+      fs.unlinkSync(fullPath);
+      return { success: true, message: `Файл удалён: ${op.filePath}` };
+    } catch (err: unknown) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      return { success: false, message: `Ошибка: ${errMsg}` };
+    }
   }
 
   // ─── Операции с файлами ──────────────────────────

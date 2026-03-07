@@ -117,7 +117,7 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
   }
 
   private async handleFileOperation(operation: FileOperation): Promise<void> {
-    const result = await this.fileOps.executeWithApproval(operation);
+    const result = await this.fileOps.executeDirect(operation);
     this.postMessageToWebview({
       type: 'operationResult',
       result,
@@ -553,14 +553,14 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
     function stripFileOpMarkers(text) {
       // Use string-built regexes to avoid literal < and > which break HTML parsing
       var L3 = String.fromCharCode(60,60,60);
-      var R3 = String.fromCharCode(62,62,62);
+      var GT2 = String.fromCharCode(62) + '(2,)';
       var GT = String.fromCharCode(62);
-      text = text.replace(new RegExp(L3 + '\\s*CREATE_FILE\\s+path=' + '\"[^\"]*\"' + '\\s*' + R3 + '[\\s\\S]*?' + L3 + '\\s*END_FILE\\s*' + R3, 'g'), '');
-      text = text.replace(new RegExp(L3 + '\\s*EDIT_FILE\\s+path=' + '\"[^\"]*\"' + '\\s*' + R3 + '[\\s\\S]*?' + L3 + '\\s*END_FILE\\s*' + R3, 'g'), '');
-      text = text.replace(new RegExp(L3 + '\\s*DELETE_FILE\\s+path=' + '\"[^\"]*\"' + '\\s*\\/?' + '\\s*' + R3, 'g'), '');
-      text = text.replace(new RegExp(L3 + '\\s*EXECUTE\\s+command=' + '\"[^\"]*\"' + '\\s*\\/?' + '\\s*' + R3, 'g'), '');
+      text = text.replace(new RegExp(L3 + '\\s*CREATE_FILE\\s+path=' + '\"[^\"]*\"' + '\\s*' + GT2 + '[\\s\\S]*?(?:' + L3 + '\\s*END_FILE\\s*' + GT2 + '|$|(?=' + L3 + '\\s*(?:CREATE|EDIT|DELETE|EXECUTE)))', 'g'), '');
+      text = text.replace(new RegExp(L3 + '\\s*EDIT_FILE\\s+path=' + '\"[^\"]*\"' + '\\s*' + GT2 + '[\\s\\S]*?(?:' + L3 + '\\s*END_FILE\\s*' + GT2 + '|$|(?=' + L3 + '\\s*(?:CREATE|EDIT|DELETE|EXECUTE)))', 'g'), '');
+      text = text.replace(new RegExp(L3 + '\\s*DELETE_FILE\\s+path=' + '\"[^\"]*\"' + '\\s*\\/?' + '\\s*' + GT2, 'g'), '');
+      text = text.replace(new RegExp(L3 + '\\s*EXECUTE\\s+command=' + '\"[^\"]*\"' + '\\s*\\/?' + '\\s*' + GT2, 'g'), '');
       text = text.replace(new RegExp(L3 + '\\s*(CREATE_FILE|EDIT_FILE|DELETE_FILE|EXECUTE)[^' + GT + ']*$', 'g'), '');
-      text = text.replace(new RegExp(L3 + '\\s*END_FILE\\s*' + R3, 'g'), '');
+      text = text.replace(new RegExp(L3 + '\\s*END_FILE\\s*' + GT2, 'g'), '');
       return text.trim();
     }
 
