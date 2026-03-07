@@ -1,0 +1,228 @@
+{
+  "name": "intellicode-fabric",
+  "displayName": "IntelliCode Fabric",
+  "description": "AI-ассистент для разработки с контекстом всего проекта. RAG-индексация, мульти-агентная система, inline-редактирование, файловые операции с одобрением.",
+  "version": "1.0.0",
+  "publisher": "intellicode-fabric",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Machine Learning",
+    "Other"
+  ],
+  "keywords": [
+    "ai",
+    "assistant",
+    "copilot",
+    "rag",
+    "refactoring",
+    "code-generation",
+    "ollama"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "intellicode-fabric",
+          "title": "IntelliCode Fabric",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "intellicode-fabric": [
+        {
+          "type": "webview",
+          "id": "intellicodeFabric.chatView",
+          "name": "AI Chat"
+        },
+        {
+          "id": "intellicodeFabric.ragStatus",
+          "name": "RAG Status"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "intellicodeFabric.indexProject",
+        "title": "IntelliCode Fabric: Index Project",
+        "icon": "$(search)"
+      },
+      {
+        "command": "intellicodeFabric.askQuestion",
+        "title": "IntelliCode Fabric: Ask AI Question",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "intellicodeFabric.generateCode",
+        "title": "IntelliCode Fabric: Generate Code",
+        "icon": "$(code)"
+      },
+      {
+        "command": "intellicodeFabric.refactor",
+        "title": "IntelliCode Fabric: Refactor Selected Code",
+        "icon": "$(wrench)"
+      },
+      {
+        "command": "intellicodeFabric.generateTests",
+        "title": "IntelliCode Fabric: Generate Tests",
+        "icon": "$(beaker)"
+      },
+      {
+        "command": "intellicodeFabric.inlineEdit",
+        "title": "IntelliCode Fabric: Inline Edit",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "intellicodeFabric.explainCode",
+        "title": "IntelliCode Fabric: Explain Code",
+        "icon": "$(info)"
+      },
+      {
+        "command": "intellicodeFabric.clearIndex",
+        "title": "IntelliCode Fabric: Clear Index",
+        "icon": "$(trash)"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "intellicodeFabric.generateCode",
+          "group": "intellicodeFabric@1",
+          "when": "editorHasSelection"
+        },
+        {
+          "command": "intellicodeFabric.refactor",
+          "group": "intellicodeFabric@2",
+          "when": "editorHasSelection"
+        },
+        {
+          "command": "intellicodeFabric.generateTests",
+          "group": "intellicodeFabric@3",
+          "when": "editorHasSelection"
+        },
+        {
+          "command": "intellicodeFabric.explainCode",
+          "group": "intellicodeFabric@4",
+          "when": "editorHasSelection"
+        },
+        {
+          "command": "intellicodeFabric.inlineEdit",
+          "group": "intellicodeFabric@5",
+          "when": "editorHasSelection"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "IntelliCode Fabric",
+      "properties": {
+        "intellicodeFabric.apiProvider": {
+          "type": "string",
+          "default": "ollama",
+          "enum": [
+            "openai",
+            "anthropic",
+            "ollama",
+            "custom"
+          ],
+          "enumDescriptions": [
+            "OpenAI (requires API key)",
+            "Anthropic Claude (requires API key)",
+            "Ollama (local, no API key needed)",
+            "Custom OpenAI-compatible endpoint"
+          ],
+          "description": "LLM provider to use"
+        },
+        "intellicodeFabric.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "API key (not needed for Ollama)"
+        },
+        "intellicodeFabric.apiEndpoint": {
+          "type": "string",
+          "default": "",
+          "description": "Custom API endpoint. For Ollama: http://localhost:11434"
+        },
+        "intellicodeFabric.model": {
+          "type": "string",
+          "default": "llama3.2",
+          "description": "LLM model name. Examples: llama3.2, gpt-4o, claude-3-5-sonnet-20241022"
+        },
+        "intellicodeFabric.embeddingModel": {
+          "type": "string",
+          "default": "nomic-embed-text",
+          "description": "Embedding model. For Ollama: nomic-embed-text. For OpenAI: text-embedding-3-small"
+        },
+        "intellicodeFabric.maxContextFiles": {
+          "type": "number",
+          "default": 10,
+          "description": "Maximum files in RAG context"
+        },
+        "intellicodeFabric.excludePatterns": {
+          "type": "array",
+          "default": [
+            "node_modules",
+            ".git",
+            "dist",
+            "build"
+          ],
+          "description": "Directories/patterns to exclude from indexing"
+        },
+        "intellicodeFabric.autoIndex": {
+          "type": "boolean",
+          "default": true,
+          "description": "Auto-index project on startup"
+        },
+        "intellicodeFabric.chunkSize": {
+          "type": "number",
+          "default": 60,
+          "description": "Chunk size in lines for code splitting"
+        },
+        "intellicodeFabric.chunkOverlap": {
+          "type": "number",
+          "default": 10,
+          "description": "Chunk overlap in lines"
+        }
+      }
+    },
+    "keybindings": [
+      {
+        "command": "intellicodeFabric.askQuestion",
+        "key": "ctrl+shift+a",
+        "mac": "cmd+shift+a"
+      },
+      {
+        "command": "intellicodeFabric.generateCode",
+        "key": "ctrl+shift+g",
+        "mac": "cmd+shift+g",
+        "when": "editorHasSelection"
+      },
+      {
+        "command": "intellicodeFabric.inlineEdit",
+        "key": "ctrl+shift+e",
+        "mac": "cmd+shift+e",
+        "when": "editorHasSelection"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.3.0",
+    "@vscode/vsce": "^2.22.0"
+  },
+  "dependencies": {}
+}
