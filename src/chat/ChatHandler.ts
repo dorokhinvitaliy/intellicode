@@ -14,35 +14,31 @@ export class ChatHandler {
   private orchestrator: AgentOrchestrator;
   private conversationHistory: ChatMessage[] = [];
 
-  // ─── System Prompt (optimized for 7B local models) ───────────────
+  // Max chars per context fragment (keep 7B model focused)
+  private static MAX_FRAGMENT_CHARS = 400;
+  // Max total context chars
+  private static MAX_CONTEXT_CHARS = 3000;
+  // Max history entries (pairs of user+assistant)
+  private static MAX_HISTORY = 6;
+  // Max chars to store per assistant response in history
+  private static MAX_HISTORY_RESPONSE = 200;
 
   private static SYSTEM_PROMPT = `You are IntelliCode — a coding agent inside VS Code.
 
-## CRITICAL: WHEN TO ACT vs WHEN TO TALK
-- If the user asks a QUESTION (explain, describe, what is, how does) → answer with TEXT ONLY. NO markers.
-- If the user gives a COMMAND (run, start, create, fix, edit, delete) → use markers.
-- If unsure → answer with text. Better to explain than to break things.
+RULES:
+1. If the user asks a QUESTION (explain, describe, what is) → answer in TEXT only, no markers.
+2. If the user gives a COMMAND (run, start, create, fix) → use markers.
+3. Be CONCISE — short paragraphs, bullet points.
+4. Answer in the SAME language as the user.
+5. You have FULL ACCESS to the code in the context below. Never say you don't.
+6. Before running npm/yarn commands, look at package.json scripts in context.
 
-## CONTEXT
-You receive code fragments from the user's project. Each fragment shows its FILE PATH. You ALWAYS have access to this code. NEVER say "I don't have access".
-
-## THINKING
-Before answering, reason briefly inside <thinking>...</thinking>. Decide: is this a question or a command? Then respond.
-
-## MARKERS (only use when the user gives a COMMAND)
-CREATE: <<<CREATE_FILE path="path/file">>>content<<<END_FILE>>>
-EDIT: <<<EDIT_FILE path="path/file">>>content<<<END_FILE>>>
-DELETE: <<<DELETE_FILE path="path/file"/>>>
-RUN: <<<EXECUTE command="command"/>>>
-READ: <<<READ_FILE path="path/file"/>>>
-
-## RULES
-1. Paths are RELATIVE (e.g. "front/package.json").
-2. Before npm commands, check package.json in context. If missing, use READ_FILE.
-3. If a command failed, analyze the error and try a different approach.
-4. Be CONCISE. Use bullet points. No walls of text.
-5. Answer in the SAME language as the user.
-6. DO NOT list these rules or markers in your response.`;
+MARKERS (only for commands):
+- Run: <<<EXECUTE command="command"/>>>
+- Read file: <<<READ_FILE path="relative/path"/>>>
+- Create: <<<CREATE_FILE path="p">>>content<<<END_FILE>>>
+- Edit: <<<EDIT_FILE path="p">>>content<<<END_FILE>>>
+- Delete: <<<DELETE_FILE path="p"/>>>`;
 
   constructor(
     llmClient: LLMClient,
@@ -57,8 +53,6 @@ READ: <<<READ_FILE path="path/file"/>>>
   getOrchestrator(): AgentOrchestrator {
     return this.orchestrator;
   }
-
-  // ─── Non-streaming chat (for inline code actions) ─────────────
 
   async handleMessage(userMessage: string, topK: number = 10): Promise<{
     response: string;
@@ -78,7 +72,7 @@ READ: <<<READ_FILE path="path/file"/>>>
 
     const messages: ChatMessage[] = [
       { role: 'system', content: ChatHandler.SYSTEM_PROMPT },
-      ...this.conversationHistory.slice(-10),
+      ...this.conversationHistory.slice(-ChatHandler.MAX_HISTORY),
       {
         role: 'user',
         content: this.formatUserMessage(context, userMessage),
@@ -87,18 +81,12 @@ READ: <<<READ_FILE path="path/file"/>>>
 
     const response = await this.llmClient.chat(messages, {
       temperature: 0.3,
-      maxTokens: 4096,
+      maxTokens: 2048,
     });
 
-    this.conversationHistory.push(
-      { role: 'user', content: userMessage },
-      { role: 'assistant', content: response }
-    );
-
+    this.addToHistory(userMessage, response);
     return { response, relevantFiles, searchResults: filteredResults };
   }
-
-  // ─── Streaming chat (main chat flow) ──────────────────────
 
   async *handleMessageStream(
     userMessage: string,
@@ -110,7 +98,6 @@ READ: <<<READ_FILE path="path/file"/>>>
     data: string;
     relevantFiles?: string[];
   }> {
-    // For error feedback, combine original query with error for better RAG
     const searchQuery = isFeedback && retrievalQuery
       ? `${retrievalQuery} ${userMessage}`
       : (retrievalQuery || userMessage);
@@ -134,7 +121,7 @@ READ: <<<READ_FILE path="path/file"/>>>
 
     const messages: ChatMessage[] = [
       { role: 'system', content: ChatHandler.SYSTEM_PROMPT },
-      ...this.conversationHistory.slice(-10),
+      ...this.conversationHistory.slice(-ChatHandler.MAX_HISTORY),
       {
         role: 'user',
         content: this.formatUserMessage(context, userMessage),
@@ -147,18 +134,12 @@ READ: <<<READ_FILE path="path/file"/>>>
       yield { type: 'token', data: token };
     }
 
-    // Don't pollute history with automated feedback
     if (!isFeedback) {
-      this.conversationHistory.push(
-        { role: 'user', content: userMessage },
-        { role: 'assistant', content: fullResponse }
-      );
+      this.addToHistory(userMessage, fullResponse);
     }
 
     yield { type: 'done', data: fullResponse };
   }
-
-  // ─── Code generation (from editor selection) ──────────────
 
   async generateCode(
     instruction: string,
@@ -205,8 +186,6 @@ READ: <<<READ_FILE path="path/file"/>>>
     };
   }
 
-  // ─── Code explanation ─────────────────────────────────────
-
   async explainCode(
     code: string,
     language: string,
@@ -230,8 +209,6 @@ READ: <<<READ_FILE path="path/file"/>>>
     return this.llmClient.chat(messages, { temperature: 0.3 });
   }
 
-  // ─── History management ───────────────────────────────────
-
   clearHistory(): void {
     this.conversationHistory = [];
   }
@@ -239,10 +216,38 @@ READ: <<<READ_FILE path="path/file"/>>>
   // ─── Private helpers ──────────────────────────────────────
 
   /**
-   * Format user message with context and query clearly separated.
+   * USER QUERY GOES FIRST — 7B models pay most attention to the beginning.
+   * Context comes after, clearly labeled as reference material.
    */
   private formatUserMessage(context: string, userMessage: string): string {
-    return `## Project Code Fragments\n${context}\n\n## User Request\n${userMessage}`;
+    return `USER REQUEST: ${userMessage}\n\nREFERENCE CODE (use these files to answer):\n${context}`;
+  }
+
+  /**
+   * Truncate AI response before storing in history.
+   * Full verbose responses eat the 7B model's context window.
+   */
+  private addToHistory(userMessage: string, aiResponse: string): void {
+    // Strip markers from stored response
+    const cleanResponse = aiResponse
+      .replace(/<<<[\s\S]*?>>>/g, '')
+      .replace(/<thinking[\s\S]*?<\/thinking>/gi, '')
+      .trim();
+
+    // Truncate to keep history slim
+    const truncated = cleanResponse.length > ChatHandler.MAX_HISTORY_RESPONSE
+      ? cleanResponse.substring(0, ChatHandler.MAX_HISTORY_RESPONSE) + '...'
+      : cleanResponse;
+
+    this.conversationHistory.push(
+      { role: 'user', content: userMessage },
+      { role: 'assistant', content: truncated }
+    );
+
+    // Keep history bounded
+    while (this.conversationHistory.length > ChatHandler.MAX_HISTORY) {
+      this.conversationHistory.shift();
+    }
   }
 
   /**
@@ -254,27 +259,42 @@ READ: <<<READ_FILE path="path/file"/>>>
       return !fp.includes('node_modules') &&
         !fp.includes('.git/') &&
         !fp.includes('dist/') &&
-        !fp.includes('.next/');
+        !fp.includes('.next/') &&
+        !fp.includes('build/');
     });
   }
 
   /**
-   * Build context string from search results.
-   * Emphasizes file paths so the model can reason about project structure.
+   * Build context with size limits to keep 7B model focused.
    */
   private buildContext(searchResults: SearchResult[]): string {
     if (searchResults.length === 0) {
       return '(No indexed code available. Run project indexing first.)';
     }
 
-    return searchResults
-      .map((result, i) => {
-        const chunk = result.chunk;
-        const header = `### [${i + 1}] ${chunk.filePath}`;
-        const meta = `Lines ${chunk.startLine}-${chunk.endLine} | ${chunk.type}${chunk.symbolName ? ` | ${chunk.symbolName}` : ''}`;
-        return `${header}\n${meta}\n\`\`\`\n${chunk.content}\n\`\`\``;
-      })
-      .join('\n\n');
+    let totalChars = 0;
+    const fragments: string[] = [];
+
+    for (const result of searchResults) {
+      const chunk = result.chunk;
+      // Truncate individual fragments
+      let content = chunk.content;
+      if (content.length > ChatHandler.MAX_FRAGMENT_CHARS) {
+        content = content.substring(0, ChatHandler.MAX_FRAGMENT_CHARS) + '\n... (truncated)';
+      }
+
+      const fragment = `[${chunk.filePath}] (${chunk.type}${chunk.symbolName ? ': ' + chunk.symbolName : ''})\n${content}`;
+
+      // Check total size limit
+      if (totalChars + fragment.length > ChatHandler.MAX_CONTEXT_CHARS) {
+        break;
+      }
+
+      fragments.push(fragment);
+      totalChars += fragment.length;
+    }
+
+    return fragments.join('\n---\n');
   }
 
   private extractCodeBlock(text: string): string {

@@ -43,7 +43,10 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
         case 'chat':
           this.feedbackDepth = 0;
           this.lastUserQuery = message.text;
-          await this.handleChatMessage(message.text);
+          // Try smart command routing first (bypasses LLM for simple commands)
+          if (!await this.trySmartRoute(message.text)) {
+            await this.handleChatMessage(message.text);
+          }
           break;
         case 'indexProject':
           vscode.commands.executeCommand('intellicodeFabric.indexProject');
@@ -90,10 +93,19 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
     // Detect if this is a question (not a command) — if so, skip marker parsing
     const isQuestion = !isFeedback && this.isQuestionMessage(text);
 
+    // For commands, inject project config files so the LLM can make informed decisions
+    let enrichedText = text;
+    if (!isQuestion && !isFeedback) {
+      const configContext = this.getProjectConfigContext();
+      if (configContext) {
+        enrichedText = text + configContext;
+      }
+    }
+
     try {
       const retrievalQuery = isFeedback ? this.lastUserQuery : undefined;
       for await (const chunk of this.chatHandler.handleMessageStream(
-        text, 10, retrievalQuery, isFeedback
+        enrichedText, 10, retrievalQuery, isFeedback
       )) {
         switch (chunk.type) {
           case 'context':
@@ -155,6 +167,106 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
   }
 
   /**
+   * Smart command router: only handles terminal management.
+   * For actual commands, falls through to LLM with injected project config.
+   */
+  private async trySmartRoute(text: string): Promise<boolean> {
+    const lower = text.toLowerCase().trim();
+
+    // Only handle stop/kill commands — these are VS Code terminal actions, not AI's job
+    const stopPatterns = [
+      'останови', 'остановить', 'стоп', 'убей', 'закрой', 'выключи',
+      'stop', 'kill', 'terminate', 'shut down', 'shutdown',
+    ];
+    const isStopCommand = stopPatterns.some(p => lower.startsWith(p) || lower.includes(p));
+    if (isStopCommand) {
+      const terminals = vscode.window.terminals.filter(
+        t => t.name.startsWith('IntelliCode:')
+      );
+      if (terminals.length > 0) {
+        for (const t of terminals) {
+          t.dispose();
+        }
+        this.postMessageToWebview({
+          type: 'token',
+          text: `✅ Остановлено ${terminals.length} процесс(ов). Терминалы закрыты.`,
+        });
+      } else {
+        this.postMessageToWebview({
+          type: 'token',
+          text: `Нет запущенных процессов IntelliCode для остановки.`,
+        });
+      }
+      this.postMessageToWebview({ type: 'done' });
+      return true;
+    }
+
+    // Everything else → LLM with project config context
+    return false;
+  }
+
+  /**
+   * Scan workspace for project config files and return their contents.
+   * This gives the LLM real data to decide which commands to run.
+   */
+  private getProjectConfigContext(): string {
+    const rootPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+    if (!rootPath) return '';
+
+    const configs: string[] = [];
+
+    // Config files to look for
+    const configFiles = [
+      'package.json', 'pom.xml', 'build.gradle',
+      'requirements.txt', 'Makefile', 'docker-compose.yml', 'docker-compose.yaml',
+    ];
+
+    // Scan root + first-level subdirectories
+    const dirsToScan = ['.'];
+    try {
+      const entries = fs.readdirSync(rootPath, { withFileTypes: true });
+      for (const entry of entries) {
+        if (entry.isDirectory() && !entry.name.startsWith('.') && entry.name !== 'node_modules') {
+          dirsToScan.push(entry.name);
+        }
+      }
+    } catch { /* ignore */ }
+
+    for (const dir of dirsToScan) {
+      for (const configFile of configFiles) {
+        const configPath = path.join(rootPath, dir, configFile);
+        if (fs.existsSync(configPath)) {
+          try {
+            let content = fs.readFileSync(configPath, 'utf-8');
+            const relPath = dir === '.' ? configFile : `${dir}/${configFile}`;
+
+            // For package.json, extract only name + scripts (skip dependencies bloat)
+            if (configFile === 'package.json') {
+              try {
+                const pkg = JSON.parse(content);
+                const slim: Record<string, unknown> = { name: pkg.name };
+                if (pkg.scripts) slim.scripts = pkg.scripts;
+                content = JSON.stringify(slim, null, 2);
+              } catch { /* use raw if parse fails */ }
+            }
+
+            // Truncate very large files
+            if (content.length > 500) {
+              content = content.substring(0, 500) + '\n...(truncated)';
+            }
+
+            configs.push(`[${relPath}]\n${content}`);
+          } catch { /* skip unreadable */ }
+        }
+      }
+    }
+
+    return configs.length > 0
+      ? '\n\nPROJECT CONFIG FILES (use these to determine the correct commands):\n' + configs.join('\n---\n')
+      : '';
+  }
+
+  /**
    * Detect if user message is a question (not a command).
    * Questions should get text-only answers, no markers.
    */
@@ -207,24 +319,48 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
       result,
     });
 
-    // Re-index if file was created/edited
-    if (result.success && operation.filePath && operation.type !== 'delete') {
-      const stats = this.indexer.getStats();
-      if (stats.lastIndexed) {
-        await this.indexer.indexFile(
-          path.join(
-            vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '',
-            operation.filePath
-          )
-        );
-      }
-    }
+    // Show command output in chat if available
+    if (result.output && operation.type === 'execute') {
+      // Truncate very long output for display (keep first 2000 chars)
+      const displayOutput = result.output.length > 2000
+        ? result.output.substring(0, 2000) + '\n... (truncated)'
+        : result.output;
 
-    // Error feedback loop: send error back to AI for analysis (max 1 retry)
-    if (!result.success && this.feedbackDepth < 1) {
-      this.feedbackDepth++;
-      const errorFeedback = `Command failed with error:\n${result.message}\n${result.output ? `Output: ${result.output}` : ''}\n\nAnalyze this error and try a different approach to complete the original task.`;
-      await this.handleChatMessage(errorFeedback, true);
+      this.postMessageToWebview({
+        type: 'commandOutput',
+        output: displayOutput,
+        command: operation.command || '',
+        success: result.success,
+      });
+
+      // Send output to AI for commentary (max 1 retry depth)
+      if (this.feedbackDepth < 1) {
+        this.feedbackDepth++;
+        const truncatedForAI = result.output.substring(0, 1000);
+        const statusWord = result.success ? 'completed successfully' : 'failed';
+        const commentary = `Command \`${operation.command}\` ${statusWord}. Output:\n\`\`\`\n${truncatedForAI}\n\`\`\`\nBriefly explain to the user what happened. If it's a dev server, mention the URL. If there's an error, explain the cause and suggest a fix. Be concise — 2-3 sentences max.`;
+        await this.handleChatMessage(commentary, true);
+      }
+    } else {
+      // Re-index if file was created/edited
+      if (result.success && operation.filePath && operation.type !== 'delete') {
+        const stats = this.indexer.getStats();
+        if (stats.lastIndexed) {
+          await this.indexer.indexFile(
+            path.join(
+              vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '',
+              operation.filePath
+            )
+          );
+        }
+      }
+
+      // Error feedback for non-command operations
+      if (!result.success && this.feedbackDepth < 1) {
+        this.feedbackDepth++;
+        const errorFeedback = `Operation failed: ${result.message}\n\nAnalyze this error and try a different approach.`;
+        await this.handleChatMessage(errorFeedback, true);
+      }
     }
   }
 
@@ -476,6 +612,40 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
       background: rgba(244, 71, 71, 0.12);
       border-left: 3px solid var(--error);
       color: var(--error);
+    }
+
+    /* ─── Command output ─── */
+    .cmd-output {
+      margin: 6px 0;
+      border-radius: 6px;
+      overflow: hidden;
+      border: 1px solid rgba(255,255,255,0.08);
+    }
+    .cmd-output-header {
+      display: flex; align-items: center; gap: 6px;
+      padding: 6px 10px;
+      font-size: 11px; font-weight: 600;
+      background: rgba(255,255,255,0.04);
+      cursor: pointer; user-select: none;
+    }
+    .cmd-output-header svg { width: 12px; height: 12px; flex-shrink: 0; }
+    .cmd-output-success .cmd-output-header { color: var(--success); border-left: 3px solid var(--success); }
+    .cmd-output-error .cmd-output-header { color: var(--error); border-left: 3px solid var(--error); }
+    .cmd-output-body {
+      padding: 8px 10px;
+      font-family: 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+      font-size: 11px;
+      line-height: 1.4;
+      background: rgba(0,0,0,0.3);
+      color: var(--fg-dim);
+      max-height: 300px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+    .cmd-output-cmd {
+      font-size: 10px; color: var(--fg-dim); opacity: 0.7;
+      margin-left: auto;
     }
 
     /* ─── Thinking indicator ─── */
@@ -1010,6 +1180,34 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
           resDiv.className = 'op-result ' + cls;
           resDiv.innerHTML = icon + '<span>' + escapeHtml(msg.result.message) + '</span>';
           messagesEl.appendChild(resDiv);
+          messagesEl.scrollTop = messagesEl.scrollHeight;
+          break;
+        }
+
+        case 'commandOutput': {
+          var cmdDiv = document.createElement('div');
+          cmdDiv.className = 'cmd-output ' + (msg.success ? 'cmd-output-success' : 'cmd-output-error');
+
+          var cmdHeader = document.createElement('div');
+          cmdHeader.className = 'cmd-output-header';
+          cmdHeader.textContent = (msg.success ? '\u2705 ' : '\u274c ') + (msg.success ? 'Command Output' : 'Error Output');
+
+          var cmdLabel = document.createElement('span');
+          cmdLabel.className = 'cmd-output-cmd';
+          cmdLabel.textContent = msg.command;
+          cmdHeader.appendChild(cmdLabel);
+
+          var cmdBody = document.createElement('div');
+          cmdBody.className = 'cmd-output-body';
+          cmdBody.textContent = msg.output;
+
+          cmdHeader.addEventListener('click', function() {
+            cmdBody.style.display = cmdBody.style.display === 'none' ? 'block' : 'none';
+          });
+
+          cmdDiv.appendChild(cmdHeader);
+          cmdDiv.appendChild(cmdBody);
+          messagesEl.appendChild(cmdDiv);
           messagesEl.scrollTop = messagesEl.scrollHeight;
           break;
         }

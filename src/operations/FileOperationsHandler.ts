@@ -382,12 +382,35 @@ export class FileOperationsHandler {
       return { success: false, message: 'Выполнение команды отклонено' };
     }
 
+    // Detect long-running commands (dev servers, watchers) — but NOT stop/kill
+    const cmd = op.command.toLowerCase();
+    const isStopCommand = ['stop', 'kill', 'close', 'exit'].some(kw => cmd.includes(kw));
+    const isLongRunning = !isStopCommand && ['dev', 'start', 'serve', 'watch'].some(
+      kw => cmd.includes(`run ${kw}`) || cmd.includes(`npm ${kw}`) || cmd.includes(`yarn ${kw}`) || cmd.endsWith(kw)
+    );
+
+    if (isLongRunning) {
+      // Use VS Code integrated terminal for live output
+      const terminal = vscode.window.createTerminal({
+        name: `IntelliCode: ${op.command}`,
+        cwd: rootPath,
+      });
+      terminal.show();
+      terminal.sendText(op.command);
+
+      return {
+        success: true,
+        message: `Команда запущена в терминале: ${op.command}`,
+        output: 'Команда запущена во встроенном терминале VS Code. Смотрите вывод во вкладке «Терминал» внизу окна.',
+      };
+    }
+
+    // Short commands: capture output via cp.exec
     return new Promise((resolve) => {
       const cwd = rootPath || process.cwd();
 
       cp.exec(op.command!, { cwd, timeout: 60000, maxBuffer: 1024 * 1024 }, (error, stdout, stderr) => {
         if (error) {
-          // Показываем вывод ошибки
           const output = stderr || stdout || error.message;
           vscode.window.showErrorMessage(`Команда завершилась с ошибкой: ${error.message}`);
           resolve({
