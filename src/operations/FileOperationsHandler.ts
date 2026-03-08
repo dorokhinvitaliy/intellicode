@@ -390,19 +390,79 @@ export class FileOperationsHandler {
     );
 
     if (isLongRunning) {
-      // Use VS Code integrated terminal for live output
-      const terminal = vscode.window.createTerminal({
-        name: `IntelliCode: ${op.command}`,
-        cwd: rootPath,
-      });
-      terminal.show();
-      terminal.sendText(op.command);
+      // Use cp.spawn to capture initial output, then show terminal for live monitoring
+      return new Promise((resolve) => {
+        const cwd = rootPath || process.cwd();
 
-      return {
-        success: true,
-        message: `Команда запущена в терминале: ${op.command}`,
-        output: 'Команда запущена во встроенном терминале VS Code. Смотрите вывод во вкладке «Терминал» внизу окна.',
-      };
+        // Parse command: handle "cd dir && command" pattern
+        const shell = process.platform === 'win32' ? 'cmd' : '/bin/sh';
+        const shellFlag = process.platform === 'win32' ? '/c' : '-c';
+        const child = cp.spawn(shell, [shellFlag, op.command!], { cwd });
+
+        let output = '';
+        let resolved = false;
+
+        const appendOutput = (data: Buffer) => {
+          output += data.toString();
+        };
+
+        child.stdout.on('data', appendOutput);
+        child.stderr.on('data', appendOutput);
+
+        child.on('error', (err) => {
+          if (!resolved) {
+            resolved = true;
+            resolve({
+              success: false,
+              message: `Ошибка запуска: ${err.message}`,
+              output: output || err.message,
+            });
+          }
+        });
+
+        child.on('exit', (code) => {
+          if (!resolved) {
+            resolved = true;
+            if (code !== 0) {
+              resolve({
+                success: false,
+                message: `Команда завершилась с кодом ${code}`,
+                output: output || `Exit code: ${code}`,
+              });
+            } else {
+              resolve({
+                success: true,
+                message: `Команда выполнена успешно`,
+                output: output || '(нет вывода)',
+              });
+            }
+          }
+        });
+
+        // Wait 5 seconds for initial output, then resolve as "running"
+        setTimeout(() => {
+          if (!resolved) {
+            resolved = true;
+
+            // Also open a terminal for live monitoring
+            const terminal = vscode.window.createTerminal({
+              name: `IntelliCode: ${op.command}`,
+              cwd: rootPath,
+            });
+            terminal.show();
+            terminal.sendText(op.command!);
+
+            resolve({
+              success: true,
+              message: `Команда запущена: ${op.command}`,
+              output: output || '(сервер запускается...)',
+            });
+
+            // Kill the spawn (terminal takes over)
+            child.kill();
+          }
+        }, 5000);
+      });
     }
 
     // Short commands: capture output via cp.exec

@@ -14,10 +14,10 @@ export class ChatHandler {
   private orchestrator: AgentOrchestrator;
   private conversationHistory: ChatMessage[] = [];
 
-  // Max chars per context fragment (keep 7B model focused)
-  private static MAX_FRAGMENT_CHARS = 400;
+  // Max chars per context fragment
+  private static MAX_FRAGMENT_CHARS = 500;
   // Max total context chars
-  private static MAX_CONTEXT_CHARS = 3000;
+  private static MAX_CONTEXT_CHARS = 4000;
   // Max history entries (pairs of user+assistant)
   private static MAX_HISTORY = 6;
   // Max chars to store per assistant response in history
@@ -25,20 +25,46 @@ export class ChatHandler {
 
   private static SYSTEM_PROMPT = `You are IntelliCode — a coding agent inside VS Code.
 
-RULES:
-1. If the user asks a QUESTION (explain, describe, what is) → answer in TEXT only, no markers.
-2. If the user gives a COMMAND (run, start, create, fix) → use markers.
-3. Be CONCISE — short paragraphs, bullet points.
-4. Answer in the SAME language as the user.
-5. You have FULL ACCESS to the code in the context below. Never say you don't.
-6. Before running npm/yarn commands, look at package.json scripts in context.
+CRITICAL: Before ANY action, you MUST think step by step in a <thinking> block:
+<thinking>
+1. What does the user want?
+2. What do the PROJECT CONFIG FILES show? (read them carefully — they have real scripts)
+3. Which specific file/script/command matches the request?
+4. What is the exact command to run?
+</thinking>
 
-MARKERS (only for commands):
+RULES:
+1. QUESTION (explain, describe, what is, how) → TEXT answer only, no markers.
+2. COMMAND (run, start, build, test, fix) → THINK first, then use markers.
+3. ALWAYS read the PROJECT CONFIG FILES section — it has the real package.json scripts, pom.xml, etc.
+4. Be CONCISE. 2-3 sentences + marker.
+5. Answer in the SAME language as the user.
+6. NEVER invent commands. If you don't see a script in the config files, use <<<READ_FILE>>> to check first.
+7. DO NOT use docker-compose unless the user explicitly asks for docker.
+
+MARKERS (only after thinking):
 - Run: <<<EXECUTE command="command"/>>>
 - Read file: <<<READ_FILE path="relative/path"/>>>
 - Create: <<<CREATE_FILE path="p">>>content<<<END_FILE>>>
 - Edit: <<<EDIT_FILE path="p">>>content<<<END_FILE>>>
-- Delete: <<<DELETE_FILE path="p"/>>>`;
+- Delete: <<<DELETE_FILE path="p"/>>>
+
+EXAMPLES:
+User: запусти фронтенд
+<thinking>
+1. User wants to start frontend
+2. PROJECT CONFIG shows front/package.json with scripts: {"dev": "vite"}
+3. The right command is: cd front && npm run dev
+</thinking>
+<<<EXECUTE command="cd front && npm run dev"/>>>
+
+User: запусти бэкенд
+<thinking>
+1. User wants to start backend
+2. PROJECT CONFIG shows back/pom.xml exists → it's a Java/Maven project
+3. The right command is: cd back && mvn spring-boot:run
+</thinking>
+<<<EXECUTE command="cd back && mvn spring-boot:run"/>>>`;
 
   constructor(
     llmClient: LLMClient,
@@ -90,7 +116,7 @@ MARKERS (only for commands):
 
   async *handleMessageStream(
     userMessage: string,
-    topK: number = 10,
+    topK: number = 15,
     retrievalQuery?: string,
     isFeedback: boolean = false
   ): AsyncGenerator<{
@@ -220,7 +246,26 @@ MARKERS (only for commands):
    * Context comes after, clearly labeled as reference material.
    */
   private formatUserMessage(context: string, userMessage: string): string {
-    return `USER REQUEST: ${userMessage}\n\nREFERENCE CODE (use these files to answer):\n${context}`;
+    // Separate config context (injected by SidebarChatProvider) from the user query
+    const configSeparator = '\n\nPROJECT CONFIG FILES';
+    let query = userMessage;
+    let configBlock = '';
+
+    const configIdx = userMessage.indexOf(configSeparator);
+    if (configIdx !== -1) {
+      query = userMessage.substring(0, configIdx).trim();
+      configBlock = userMessage.substring(configIdx).trim();
+    }
+
+    // Structure: Query first → Config files → RAG code
+    let result = `USER REQUEST: ${query}`;
+    if (configBlock) {
+      result += `\n\n${configBlock}`;
+    }
+    if (context && !context.startsWith('(No indexed')) {
+      result += `\n\nREFERENCE CODE:\n${context}`;
+    }
+    return result;
   }
 
   /**
@@ -260,7 +305,11 @@ MARKERS (only for commands):
         !fp.includes('.git/') &&
         !fp.includes('dist/') &&
         !fp.includes('.next/') &&
-        !fp.includes('build/');
+        !fp.includes('build/') &&
+        !fp.includes('docker-compose') &&
+        !fp.includes('compose-env') &&
+        !fp.includes('.lock') &&
+        !fp.includes('.env');
     });
   }
 

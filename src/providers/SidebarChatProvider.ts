@@ -173,28 +173,57 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
   private async trySmartRoute(text: string): Promise<boolean> {
     const lower = text.toLowerCase().trim();
 
-    // Only handle stop/kill commands — these are VS Code terminal actions, not AI's job
+    // Only handle stop/kill commands
     const stopPatterns = [
       'останови', 'остановить', 'стоп', 'убей', 'закрой', 'выключи',
       'stop', 'kill', 'terminate', 'shut down', 'shutdown',
     ];
     const isStopCommand = stopPatterns.some(p => lower.startsWith(p) || lower.includes(p));
     if (isStopCommand) {
+      this.postMessageToWebview({ type: 'context', message: 'Stopping...', files: [] });
+
+      // Kill IntelliCode terminals
       const terminals = vscode.window.terminals.filter(
         t => t.name.startsWith('IntelliCode:')
       );
+      const messages: string[] = [];
       if (terminals.length > 0) {
         for (const t of terminals) {
           t.dispose();
         }
+        messages.push(`Остановлено ${terminals.length} терминал(ов).`);
+      }
+
+      // Only offer docker-compose if:
+      // - No terminals were killed (so user isn't asking about npm processes)
+      // - OR user explicitly mentions docker/контейнер/бэк/всё
+      const dockerKeywords = ['docker', 'контейнер', 'compose', 'бэк', 'back', 'сервер', 'server', 'всё', 'все', 'all'];
+      const wantsDocker = dockerKeywords.some(kw => lower.includes(kw));
+      const rootPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+      const hasCompose = rootPath && (
+        fs.existsSync(path.join(rootPath, 'docker-compose.yml')) ||
+        fs.existsSync(path.join(rootPath, 'docker-compose.yaml'))
+      );
+
+      if (hasCompose && (wantsDocker || terminals.length === 0)) {
         this.postMessageToWebview({
           type: 'token',
-          text: `✅ Остановлено ${terminals.length} процесс(ов). Терминалы закрыты.`,
+          text: (messages.length > 0 ? messages.join('\n') + '\n\n' : '') + 'Найден `docker-compose.yml`. Остановить контейнеры?\n',
         });
+        this.postMessageToWebview({
+          type: 'fileOperations',
+          operations: [{
+            type: 'execute',
+            command: 'docker-compose down',
+            description: 'Остановить Docker контейнеры: docker-compose down',
+          }],
+        });
+      } else if (messages.length > 0) {
+        this.postMessageToWebview({ type: 'token', text: messages.join('\n') });
       } else {
         this.postMessageToWebview({
           type: 'token',
-          text: `Нет запущенных процессов IntelliCode для остановки.`,
+          text: 'Нет запущенных процессов для остановки.',
         });
       }
       this.postMessageToWebview({ type: 'done' });
@@ -215,10 +244,11 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
 
     const configs: string[] = [];
 
-    // Config files to look for
+    // Config files — ordered by priority: project configs first, infra last
+    // (7B models fixate on first thing they see)
     const configFiles = [
-      'package.json', 'pom.xml', 'build.gradle',
-      'requirements.txt', 'Makefile', 'docker-compose.yml', 'docker-compose.yaml',
+      'package.json', 'pom.xml', 'build.gradle', 'Makefile',
+      'requirements.txt', 'docker-compose.yml', 'docker-compose.yaml',
     ];
 
     // Scan root + first-level subdirectories
@@ -250,9 +280,19 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
               } catch { /* use raw if parse fails */ }
             }
 
-            // Truncate very large files
-            if (content.length > 500) {
-              content = content.substring(0, 500) + '\n...(truncated)';
+            // For docker-compose, extract only service names + ports
+            if (configFile.startsWith('docker-compose')) {
+              const serviceLines = content.split('\n').filter(
+                l => /^\s{2}\w/.test(l) || l.includes('ports:') || /^\s{6}-\s/.test(l)
+              );
+              if (serviceLines.length > 0) {
+                content = 'services:\n' + serviceLines.join('\n');
+              }
+            }
+
+            // Truncate to keep context focused
+            if (content.length > 300) {
+              content = content.substring(0, 300) + '\n...(truncated)';
             }
 
             configs.push(`[${relPath}]\n${content}`);
@@ -321,7 +361,6 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
 
     // Show command output in chat if available
     if (result.output && operation.type === 'execute') {
-      // Truncate very long output for display (keep first 2000 chars)
       const displayOutput = result.output.length > 2000
         ? result.output.substring(0, 2000) + '\n... (truncated)'
         : result.output;
@@ -333,13 +372,13 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
         success: result.success,
       });
 
-      // Send output to AI for commentary (max 1 retry depth)
+      // AI commentary — fire-and-forget
       if (this.feedbackDepth < 1) {
         this.feedbackDepth++;
         const truncatedForAI = result.output.substring(0, 1000);
         const statusWord = result.success ? 'completed successfully' : 'failed';
-        const commentary = `Command \`${operation.command}\` ${statusWord}. Output:\n\`\`\`\n${truncatedForAI}\n\`\`\`\nBriefly explain to the user what happened. If it's a dev server, mention the URL. If there's an error, explain the cause and suggest a fix. Be concise — 2-3 sentences max.`;
-        await this.handleChatMessage(commentary, true);
+        const commentary = `Command \`${operation.command}\` ${statusWord}. Output:\n\`\`\`\n${truncatedForAI}\n\`\`\`\nBriefly explain to the user what happened. If there's an error, explain the cause and suggest a fix. Be concise — 2-3 sentences max.`;
+        this.handleChatMessage(commentary, true).catch(() => { });
       }
     } else {
       // Re-index if file was created/edited
@@ -355,11 +394,11 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
         }
       }
 
-      // Error feedback for non-command operations
+      // Error feedback — fire-and-forget
       if (!result.success && this.feedbackDepth < 1) {
         this.feedbackDepth++;
         const errorFeedback = `Operation failed: ${result.message}\n\nAnalyze this error and try a different approach.`;
-        await this.handleChatMessage(errorFeedback, true);
+        this.handleChatMessage(errorFeedback, true).catch(() => { });
       }
     }
   }
@@ -1124,16 +1163,39 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
           if (welcomeEl) welcomeEl.style.display = 'none';
           var d = document.createElement('div');
           d.className = 'context-info';
-          d.innerHTML = SVG_SEARCH + '<div><span>' + escapeHtml(msg.message) + '</span>' +
-            (msg.files && msg.files.length > 0
-              ? '<div class="context-files">' + msg.files.map(function(f) {
-                  var name = f.split('/').pop() || f;
-                  return '<span class="context-file">' + escapeHtml(name) + '</span>';
-                }).join('') + '</div>'
-              : '') +
-            '</div>';
+
+          var contextHeader = document.createElement('div');
+          contextHeader.style.cssText = 'display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none;';
+          contextHeader.innerHTML = SVG_SEARCH;
+          var contextLabel = document.createElement('span');
+          contextLabel.textContent = msg.message;
+          contextHeader.appendChild(contextLabel);
+          var arrow = document.createElement('span');
+          arrow.textContent = ' \u25B6';
+          arrow.style.cssText = 'font-size:10px;transition:transform 0.2s;display:inline-block;';
+          contextHeader.appendChild(arrow);
+          d.appendChild(contextHeader);
+
+          if (msg.files && msg.files.length > 0) {
+            var filesDiv = document.createElement('div');
+            filesDiv.className = 'context-files';
+            filesDiv.style.display = 'none';
+            msg.files.forEach(function(f) {
+              var fileSpan = document.createElement('span');
+              fileSpan.className = 'context-file';
+              fileSpan.textContent = f.split('/').pop() || f;
+              filesDiv.appendChild(fileSpan);
+            });
+            d.appendChild(filesDiv);
+
+            contextHeader.addEventListener('click', function() {
+              var isHidden = filesDiv.style.display === 'none';
+              filesDiv.style.display = isHidden ? 'flex' : 'none';
+              arrow.style.transform = isHidden ? 'rotate(90deg)' : '';
+            });
+          }
+
           messagesEl.appendChild(d);
-          // Prepare assistant message container
           currentAssistantText = '';
           currentAssistantEl = addMessage('assistant', '');
           break;
