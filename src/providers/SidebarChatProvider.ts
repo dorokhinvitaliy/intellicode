@@ -1252,7 +1252,36 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
 
           var cmdHeader = document.createElement('div');
           cmdHeader.className = 'cmd-output-header';
-          cmdHeader.textContent = (msg.success ? '\u2705 ' : '\u274c ') + (msg.success ? 'Command Output' : 'Error Output');
+
+          // SVG icon via DOM namespace
+          var ns = 'http://www.w3.org/2000/svg';
+          var svgIcon = document.createElementNS(ns, 'svg');
+          svgIcon.setAttribute('viewBox', '0 0 24 24');
+          svgIcon.setAttribute('fill', 'none');
+          svgIcon.setAttribute('stroke', 'currentColor');
+          svgIcon.setAttribute('stroke-width', '2');
+          if (msg.success) {
+            var p1 = document.createElementNS(ns, 'path');
+            p1.setAttribute('d', 'M22 11.08V12a10 10 0 1 1-5.93-9.14');
+            svgIcon.appendChild(p1);
+            var p2 = document.createElementNS(ns, 'polyline');
+            p2.setAttribute('points', '22 4 12 14.01 9 11.01');
+            svgIcon.appendChild(p2);
+          } else {
+            var c1 = document.createElementNS(ns, 'circle');
+            c1.setAttribute('cx', '12'); c1.setAttribute('cy', '12'); c1.setAttribute('r', '10');
+            svgIcon.appendChild(c1);
+            var l1 = document.createElementNS(ns, 'line');
+            l1.setAttribute('x1', '15'); l1.setAttribute('y1', '9'); l1.setAttribute('x2', '9'); l1.setAttribute('y2', '15');
+            svgIcon.appendChild(l1);
+            var l2 = document.createElementNS(ns, 'line');
+            l2.setAttribute('x1', '9'); l2.setAttribute('y1', '9'); l2.setAttribute('x2', '15'); l2.setAttribute('y2', '15');
+            svgIcon.appendChild(l2);
+          }
+          cmdHeader.appendChild(svgIcon);
+
+          var cmdTitle = document.createTextNode(msg.success ? ' Command Output' : ' Error Output');
+          cmdHeader.appendChild(cmdTitle);
 
           var cmdLabel = document.createElement('span');
           cmdLabel.className = 'cmd-output-cmd';
