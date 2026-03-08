@@ -14,39 +14,35 @@ export class ChatHandler {
   private orchestrator: AgentOrchestrator;
   private conversationHistory: ChatMessage[] = [];
 
-  private static SYSTEM_PROMPT = `You are IntelliCode Fabric — an AI development assistant with the ability to create, edit, and delete files in the user's project.
+  // ─── System Prompt (optimized for 7B local models) ───────────────
 
-CRITICAL — FILE OPERATIONS:
-When the user asks you to create, edit, or modify a file, you MUST use the special markers below. This is the ONLY way files can be created or modified. Do NOT just show code — USE THE MARKERS.
+  private static SYSTEM_PROMPT = `You are IntelliCode — a coding agent inside VS Code.
 
-FILE OPERATION MARKERS (you MUST use these exact formats):
+## CRITICAL: WHEN TO ACT vs WHEN TO TALK
+- If the user asks a QUESTION (explain, describe, what is, how does) → answer with TEXT ONLY. NO markers.
+- If the user gives a COMMAND (run, start, create, fix, edit, delete) → use markers.
+- If unsure → answer with text. Better to explain than to break things.
 
-1. CREATE a new file:
-<<<CREATE_FILE path="src/example.ts">>>
-import express from 'express';
-export function hello() { return 'world'; }
-<<<END_FILE>>>
+## CONTEXT
+You receive code fragments from the user's project. Each fragment shows its FILE PATH. You ALWAYS have access to this code. NEVER say "I don't have access".
 
-2. EDIT/REPLACE a file:
-<<<EDIT_FILE path="src/example.ts">>>
-import express from 'express';
-export function hello(name: string) { return 'Hello ' + name; }
-<<<END_FILE>>>
+## THINKING
+Before answering, reason briefly inside <thinking>...</thinking>. Decide: is this a question or a command? Then respond.
 
-3. DELETE a file:
-<<<DELETE_FILE path="src/old-file.ts"/>>>
+## MARKERS (only use when the user gives a COMMAND)
+CREATE: <<<CREATE_FILE path="path/file">>>content<<<END_FILE>>>
+EDIT: <<<EDIT_FILE path="path/file">>>content<<<END_FILE>>>
+DELETE: <<<DELETE_FILE path="path/file"/>>>
+RUN: <<<EXECUTE command="command"/>>>
+READ: <<<READ_FILE path="path/file"/>>>
 
-4. RUN a terminal command:
-<<<EXECUTE command="npm install express"/>>>
-
-IMPORTANT RULES:
-- The path MUST be relative to the project root (e.g. "src/controllers/UserController.java", NOT absolute paths)
-- ALWAYS use the markers when creating or editing files — never just show code in a code block
-- You can include explanation text BEFORE or AFTER the markers
-- You can use multiple markers in one response
-- Answer in the same language the user writes in
-- Use markdown formatting for explanations
-- Reference files and line numbers when discussing existing code`;
+## RULES
+1. Paths are RELATIVE (e.g. "front/package.json").
+2. Before npm commands, check package.json in context. If missing, use READ_FILE.
+3. If a command failed, analyze the error and try a different approach.
+4. Be CONCISE. Use bullet points. No walls of text.
+5. Answer in the SAME language as the user.
+6. DO NOT list these rules or markers in your response.`;
 
   constructor(
     llmClient: LLMClient,
@@ -62,7 +58,9 @@ IMPORTANT RULES:
     return this.orchestrator;
   }
 
-  async handleMessage(userMessage: string): Promise<{
+  // ─── Non-streaming chat (for inline code actions) ─────────────
+
+  async handleMessage(userMessage: string, topK: number = 10): Promise<{
     response: string;
     relevantFiles: string[];
     searchResults: SearchResult[];
@@ -71,18 +69,19 @@ IMPORTANT RULES:
     const searchResults = await this.vectorStore.hybridSearch(
       queryEmbedding.embedding,
       userMessage,
-      10
+      topK
     );
 
-    const context = this.buildContext(searchResults);
-    const relevantFiles = [...new Set(searchResults.map(r => r.chunk.filePath))];
+    const filteredResults = this.filterResults(searchResults);
+    const context = this.buildContext(filteredResults);
+    const relevantFiles = [...new Set(filteredResults.map(r => r.chunk.filePath))];
 
     const messages: ChatMessage[] = [
       { role: 'system', content: ChatHandler.SYSTEM_PROMPT },
       ...this.conversationHistory.slice(-10),
       {
         role: 'user',
-        content: `Project codebase context:\n${context}\n\n---\n\nUser question: ${userMessage}`,
+        content: this.formatUserMessage(context, userMessage),
       },
     ];
 
@@ -96,27 +95,40 @@ IMPORTANT RULES:
       { role: 'assistant', content: response }
     );
 
-    return { response, relevantFiles, searchResults };
+    return { response, relevantFiles, searchResults: filteredResults };
   }
 
-  async *handleMessageStream(userMessage: string): AsyncGenerator<{
+  // ─── Streaming chat (main chat flow) ──────────────────────
+
+  async *handleMessageStream(
+    userMessage: string,
+    topK: number = 10,
+    retrievalQuery?: string,
+    isFeedback: boolean = false
+  ): AsyncGenerator<{
     type: 'context' | 'token' | 'done';
     data: string;
     relevantFiles?: string[];
   }> {
-    const queryEmbedding = await this.llmClient.createEmbedding(userMessage);
+    // For error feedback, combine original query with error for better RAG
+    const searchQuery = isFeedback && retrievalQuery
+      ? `${retrievalQuery} ${userMessage}`
+      : (retrievalQuery || userMessage);
+
+    const queryEmbedding = await this.llmClient.createEmbedding(searchQuery);
     const searchResults = await this.vectorStore.hybridSearch(
       queryEmbedding.embedding,
-      userMessage,
-      10
+      searchQuery,
+      topK
     );
 
-    const context = this.buildContext(searchResults);
-    const relevantFiles = [...new Set(searchResults.map(r => r.chunk.filePath))];
+    const filteredResults = this.filterResults(searchResults);
+    const context = this.buildContext(filteredResults);
+    const relevantFiles = [...new Set(filteredResults.map(r => r.chunk.filePath))];
 
     yield {
       type: 'context',
-      data: `Found ${searchResults.length} relevant code fragments`,
+      data: `Found ${filteredResults.length} relevant code fragments`,
       relevantFiles,
     };
 
@@ -125,7 +137,7 @@ IMPORTANT RULES:
       ...this.conversationHistory.slice(-10),
       {
         role: 'user',
-        content: `Project codebase context:\n${context}\n\n---\n\nUser question: ${userMessage}`,
+        content: this.formatUserMessage(context, userMessage),
       },
     ];
 
@@ -135,13 +147,18 @@ IMPORTANT RULES:
       yield { type: 'token', data: token };
     }
 
-    this.conversationHistory.push(
-      { role: 'user', content: userMessage },
-      { role: 'assistant', content: fullResponse }
-    );
+    // Don't pollute history with automated feedback
+    if (!isFeedback) {
+      this.conversationHistory.push(
+        { role: 'user', content: userMessage },
+        { role: 'assistant', content: fullResponse }
+      );
+    }
 
     yield { type: 'done', data: fullResponse };
   }
+
+  // ─── Code generation (from editor selection) ──────────────
 
   async generateCode(
     instruction: string,
@@ -188,6 +205,8 @@ IMPORTANT RULES:
     };
   }
 
+  // ─── Code explanation ─────────────────────────────────────
+
   async explainCode(
     code: string,
     language: string,
@@ -211,21 +230,51 @@ IMPORTANT RULES:
     return this.llmClient.chat(messages, { temperature: 0.3 });
   }
 
+  // ─── History management ───────────────────────────────────
+
   clearHistory(): void {
     this.conversationHistory = [];
   }
 
+  // ─── Private helpers ──────────────────────────────────────
+
+  /**
+   * Format user message with context and query clearly separated.
+   */
+  private formatUserMessage(context: string, userMessage: string): string {
+    return `## Project Code Fragments\n${context}\n\n## User Request\n${userMessage}`;
+  }
+
+  /**
+   * Filter out node_modules and other noise from search results.
+   */
+  private filterResults(results: SearchResult[]): SearchResult[] {
+    return results.filter(r => {
+      const fp = r.chunk.filePath.toLowerCase();
+      return !fp.includes('node_modules') &&
+        !fp.includes('.git/') &&
+        !fp.includes('dist/') &&
+        !fp.includes('.next/');
+    });
+  }
+
+  /**
+   * Build context string from search results.
+   * Emphasizes file paths so the model can reason about project structure.
+   */
   private buildContext(searchResults: SearchResult[]): string {
     if (searchResults.length === 0) {
-      return '(No indexed code context available. Run project indexing first.)';
+      return '(No indexed code available. Run project indexing first.)';
     }
 
     return searchResults
       .map((result, i) => {
         const chunk = result.chunk;
-        return `--- Fragment ${i + 1} (score: ${result.score.toFixed(3)}) ---\nFile: ${chunk.filePath} (lines ${chunk.startLine}-${chunk.endLine})\nType: ${chunk.type}${chunk.symbolName ? `, Name: ${chunk.symbolName}` : ''}\n\n${chunk.content}\n`;
+        const header = `### [${i + 1}] ${chunk.filePath}`;
+        const meta = `Lines ${chunk.startLine}-${chunk.endLine} | ${chunk.type}${chunk.symbolName ? ` | ${chunk.symbolName}` : ''}`;
+        return `${header}\n${meta}\n\`\`\`\n${chunk.content}\n\`\`\``;
       })
-      .join('\n');
+      .join('\n\n');
   }
 
   private extractCodeBlock(text: string): string {

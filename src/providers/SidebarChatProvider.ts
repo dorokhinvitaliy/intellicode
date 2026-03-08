@@ -1,4 +1,6 @@
 import * as vscode from 'vscode';
+import * as fs from 'fs';
+import * as path from 'path';
 import { ChatHandler } from '../chat/ChatHandler';
 import { ProjectIndexer } from '../indexing/ProjectIndexer';
 import { FileOperationsHandler, FileOperation } from '../operations/FileOperationsHandler';
@@ -8,6 +10,8 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
   private chatHandler: ChatHandler;
   private indexer: ProjectIndexer;
   private fileOps: FileOperationsHandler;
+  private feedbackDepth = 0;
+  private lastUserQuery = '';
 
   constructor(
     private readonly extensionUri: vscode.Uri,
@@ -37,6 +41,8 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
     webviewView.webview.onDidReceiveMessage(async (message) => {
       switch (message.type) {
         case 'chat':
+          this.feedbackDepth = 0;
+          this.lastUserQuery = message.text;
           await this.handleChatMessage(message.text);
           break;
         case 'indexProject':
@@ -75,11 +81,20 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
     this.view?.webview.postMessage(message);
   }
 
-  private async handleChatMessage(text: string): Promise<void> {
+  private async handleChatMessage(
+    text: string,
+    isFeedback: boolean = false
+  ): Promise<void> {
     this.postMessageToWebview({ type: 'thinking', show: true });
 
+    // Detect if this is a question (not a command) — if so, skip marker parsing
+    const isQuestion = !isFeedback && this.isQuestionMessage(text);
+
     try {
-      for await (const chunk of this.chatHandler.handleMessageStream(text)) {
+      const retrievalQuery = isFeedback ? this.lastUserQuery : undefined;
+      for await (const chunk of this.chatHandler.handleMessageStream(
+        text, 10, retrievalQuery, isFeedback
+      )) {
         switch (chunk.type) {
           case 'context':
             this.postMessageToWebview({
@@ -92,13 +107,23 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
             this.postMessageToWebview({ type: 'token', text: chunk.data });
             break;
           case 'done': {
-            // Парсим операции из ответа
-            const ops = this.fileOps.parseOperationsFromResponse(chunk.data);
-            if (ops.length > 0) {
-              this.postMessageToWebview({
-                type: 'fileOperations',
-                operations: ops,
-              });
+            // Only parse markers for command-type messages, not questions
+            if (!isQuestion) {
+              const ops = this.fileOps.parseOperationsFromResponse(chunk.data);
+
+              // Handle READ_FILE operations
+              const readFileOps = this.parseReadFileOps(chunk.data);
+              if (readFileOps.length > 0) {
+                await this.handleReadFiles(readFileOps);
+              }
+
+              const actionOps = ops.filter(op => !(op.type === 'execute' && op.command?.startsWith('READ_FILE:')));
+              if (actionOps.length > 0) {
+                this.postMessageToWebview({
+                  type: 'fileOperations',
+                  operations: actionOps,
+                });
+              }
             }
             this.postMessageToWebview({ type: 'done' });
             break;
@@ -116,6 +141,65 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
     this.postMessageToWebview({ type: 'thinking', show: false });
   }
 
+  /**
+   * Parse <<<READ_FILE path="..."/>>> markers from AI response.
+   */
+  private parseReadFileOps(response: string): string[] {
+    const paths: string[] = [];
+    const regex = /<<<\s*READ_FILE\s+path="([^"]+)"\s*\/?>>>/gi;
+    let match;
+    while ((match = regex.exec(response)) !== null) {
+      paths.push(match[1]);
+    }
+    return paths;
+  }
+
+  /**
+   * Detect if user message is a question (not a command).
+   * Questions should get text-only answers, no markers.
+   */
+  private isQuestionMessage(text: string): boolean {
+    const lower = text.toLowerCase().trim();
+    // Question patterns in Russian and English
+    const questionPatterns = [
+      'объясни', 'расскажи', 'опиши', 'что такое', 'что это',
+      'как работает', 'как устроен', 'покажи структуру', 'какая структура',
+      'зачем', 'почему', 'сколько', 'какие', 'какой', 'где ',
+      'explain', 'describe', 'what is', 'what are', 'how does',
+      'how do', 'tell me', 'show me', 'why ', 'where ',
+    ];
+    if (lower.includes('?')) return true;
+    return questionPatterns.some(p => lower.startsWith(p) || lower.includes(' ' + p));
+  }
+
+  /**
+   * Read files from disk and send their contents back to the AI.
+   */
+  private async handleReadFiles(filePaths: string[]): Promise<void> {
+    const rootPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+    const fileContents: string[] = [];
+
+    for (const fp of filePaths) {
+      const fullPath = path.join(rootPath, fp);
+      try {
+        if (fs.existsSync(fullPath)) {
+          const content = fs.readFileSync(fullPath, 'utf-8');
+          fileContents.push(`File: ${fp}\n\`\`\`\n${content}\n\`\`\``);
+        } else {
+          fileContents.push(`File: ${fp} — NOT FOUND`);
+        }
+      } catch {
+        fileContents.push(`File: ${fp} — READ ERROR`);
+      }
+    }
+
+    if (fileContents.length > 0 && this.feedbackDepth < 2) {
+      this.feedbackDepth++;
+      const feedback = `Here are the requested file contents:\n\n${fileContents.join('\n\n')}\n\nNow complete the original task using this information.`;
+      await this.handleChatMessage(feedback, true);
+    }
+  }
+
   private async handleFileOperation(operation: FileOperation): Promise<void> {
     const result = await this.fileOps.executeDirect(operation);
     this.postMessageToWebview({
@@ -123,17 +207,24 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
       result,
     });
 
-    // Переиндексируем если файл создан/изменён
+    // Re-index if file was created/edited
     if (result.success && operation.filePath && operation.type !== 'delete') {
       const stats = this.indexer.getStats();
       if (stats.lastIndexed) {
         await this.indexer.indexFile(
-          require('path').join(
+          path.join(
             vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '',
             operation.filePath
           )
         );
       }
+    }
+
+    // Error feedback loop: send error back to AI for analysis (max 1 retry)
+    if (!result.success && this.feedbackDepth < 1) {
+      this.feedbackDepth++;
+      const errorFeedback = `Command failed with error:\n${result.message}\n${result.output ? `Output: ${result.output}` : ''}\n\nAnalyze this error and try a different approach to complete the original task.`;
+      await this.handleChatMessage(errorFeedback, true);
     }
   }
 
@@ -461,6 +552,35 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
     }
     .welcome-btn:hover { background: rgba(255,255,255,0.1); }
     .welcome-btn svg { width: 14px; height: 14px; flex-shrink: 0; }
+    /* ─── Thinking block (collapsible) ─── */
+    .thinking-block {
+      margin: 8px 0;
+      border: 1px solid rgba(197, 134, 192, 0.25);
+      border-radius: 6px;
+      background: rgba(197, 134, 192, 0.06);
+      overflow: hidden;
+    }
+    .thinking-block summary {
+      padding: 6px 10px;
+      font-size: 11px;
+      font-weight: 600;
+      color: #c586c0;
+      cursor: pointer;
+      user-select: none;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .thinking-block summary:hover {
+      background: rgba(197, 134, 192, 0.1);
+    }
+    .thinking-block .thinking-content {
+      padding: 6px 12px 10px;
+      font-size: 12px;
+      color: var(--fg-dim);
+      border-top: 1px solid rgba(197, 134, 192, 0.15);
+      line-height: 1.5;
+    }
   </style>
 </head>
 <body>
@@ -551,27 +671,70 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
     // ─── Markdown Parser ────────────────────────────
 
     function stripFileOpMarkers(text) {
-      // Use string-built regexes to avoid literal < and > which break HTML parsing
-      var L3 = String.fromCharCode(60,60,60);
-      var GT2 = String.fromCharCode(62) + '{2,}';
-      var GT = String.fromCharCode(62);
-      text = text.replace(new RegExp(L3 + '\\\\s*CREATE_FILE\\\\s+path=' + '"[^"]*"' + '\\\\s*' + GT2 + '[\\\\s\\\\S]*?(?:' + L3 + '\\\\s*END_FILE\\\\s*' + GT2 + '|$|(?=' + L3 + '\\\\s*(?:CREATE|EDIT|DELETE|EXECUTE)))', 'g'), '');
-      text = text.replace(new RegExp(L3 + '\\\\s*EDIT_FILE\\\\s+path=' + '"[^"]*"' + '\\\\s*' + GT2 + '[\\\\s\\\\S]*?(?:' + L3 + '\\\\s*END_FILE\\\\s*' + GT2 + '|$|(?=' + L3 + '\\\\s*(?:CREATE|EDIT|DELETE|EXECUTE)))', 'g'), '');
-      text = text.replace(new RegExp(L3 + '\\\\s*DELETE_FILE\\\\s+path=' + '"[^"]*"' + '\\\\s*\\\\/?' + '\\\\s*' + GT2, 'g'), '');
-      text = text.replace(new RegExp(L3 + '\\\\s*EXECUTE\\\\s+command=' + '"[^"]*"' + '\\\\s*\\\\/?' + '\\\\s*' + GT2, 'g'), '');
-      text = text.replace(new RegExp(L3 + '\\\\s*(CREATE_FILE|EDIT_FILE|DELETE_FILE|EXECUTE)[^' + GT + ']*$', 'g'), '');
-      text = text.replace(new RegExp(L3 + '\\\\s*END_FILE\\\\s*' + GT2, 'g'), '');
+      // Build chars to avoid breaking HTML parsing
+      var L = String.fromCharCode(60);
+      var R = String.fromCharCode(62);
+      var S = String.fromCharCode(92) + 's'; // \s for regex
+      var SS = String.fromCharCode(92) + 'S'; // \S for regex
+      var SL = String.fromCharCode(92) + '/'; // \/ for regex
+      // CREATE_FILE and EDIT_FILE blocks (with content)
+      text = text.replace(new RegExp(L + '{2,}' + S + '*(?:CREATE|EDIT)_FILE' + S + '+path="[^"]*"' + S + '*' + R + '{2,}[' + S + SS + ']*?(?:' + L + '{2,}' + S + '*(?:END_FILE|/(?:CREATE|EDIT)_FILE)' + S + '*' + R + '{2,}|$)', 'gi'), '');
+      // DELETE_FILE
+      text = text.replace(new RegExp(L + '{2,}' + S + '*DELETE_FILE' + S + '+path="[^"]*"' + S + '*' + SL + '?' + S + '*' + R + '{2,}', 'gi'), '');
+      // EXECUTE
+      text = text.replace(new RegExp(L + '{2,}' + S + '*EXECUTE' + S + '+command="[^"]*"' + S + '*' + SL + '?' + S + '*' + R + '{2,}', 'gi'), '');
+      // READ_FILE
+      text = text.replace(new RegExp(L + '{2,}' + S + '*READ_FILE' + S + '+path="[^"]*"' + S + '*' + SL + '?' + S + '*' + R + '{2,}', 'gi'), '');
+      // END_FILE orphans
+      text = text.replace(new RegExp(L + '{2,}' + S + '*(?:END_FILE|/(?:CREATE|EDIT)_FILE)' + S + '*' + R + '{2,}', 'gi'), '');
+      // XML-style closing: </CREATE_FILE>
+      text = text.replace(new RegExp(L + '/(?:CREATE_FILE|EDIT_FILE|DELETE_FILE|EXECUTE|READ_FILE|END_FILE)' + S + '*' + R, 'gi'), '');
+      // Partial markers at end of stream
+      text = text.replace(new RegExp(L + '{2,}' + S + '*(?:CREATE_FILE|EDIT_FILE|DELETE_FILE|EXECUTE|READ_FILE)[^' + R + ']*$', 'gi'), '');
+      // Stray << or <<<
+      text = text.replace(new RegExp(L + '{2,}' + S + '*$', 'g'), '');
       return text.trim();
     }
 
     function renderMarkdown(text) {
       // Strip file operation markers before rendering
       text = stripFileOpMarkers(text);
-      // Escape HTML first
-      let html = text
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;');
+
+      // Handle <thinking> blocks using indexOf (no regex escaping issues)
+      var L = String.fromCharCode(60);
+      var R = String.fromCharCode(62);
+      var thinkOpen = L + 'thinking' + R;
+      var thinkClose = L + '/thinking' + R;
+      var thinkingHtml = '';
+      var visibleText = text;
+
+      var tStart = text.toLowerCase().indexOf(thinkOpen.toLowerCase());
+      if (tStart !== -1) {
+        var tEnd = text.toLowerCase().indexOf(thinkClose.toLowerCase(), tStart);
+        if (tEnd !== -1) {
+          // Closed thinking block
+          var before = text.substring(0, tStart);
+          var thinkContent = text.substring(tStart + thinkOpen.length, tEnd);
+          var after = text.substring(tEnd + thinkClose.length);
+          thinkingHtml = L + 'details class="thinking-block"' + R + L + 'summary' + R + String.fromCharCode(0xD83D, 0xDCAD) + ' Reasoning' + L + '/summary' + R + L + 'div class="thinking-content"' + R + escapeHtml(thinkContent.trim()) + L + '/div' + R + L + '/details' + R;
+          visibleText = before + after;
+        } else {
+          // Unclosed thinking block (streaming)
+          var before2 = text.substring(0, tStart);
+          var thinkContent2 = text.substring(tStart + thinkOpen.length);
+          thinkingHtml = L + 'details class="thinking-block" open' + R + L + 'summary' + R + String.fromCharCode(0xD83D, 0xDCAD) + ' Reasoning...' + L + '/summary' + R + L + 'div class="thinking-content"' + R + escapeHtml(thinkContent2.trim()) + L + '/div' + R + L + '/details' + R;
+          visibleText = before2;
+        }
+      }
+
+      // Escape HTML for the visible part
+      var html = escapeHtml(visibleText);
+
+      // Prepend thinking block
+      if (thinkingHtml) {
+        html = thinkingHtml + html;
+      }
+
 
       // Code blocks: \`\`\`lang\\n...\\n\`\`\`
       html = html.replace(/\`\`\`(\\w*)\\n([\\s\\S]*?)\`\`\`/g, function(match, lang, code) {
