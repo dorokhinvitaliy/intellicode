@@ -29,7 +29,7 @@ export class InlineEditProvider {
     editor: vscode.TextEditor,
     selection: vscode.Selection,
     newCode: string
-  ): Promise<void> {
+  ): Promise<string | undefined> {
     const document = editor.document;
     const originalText = document.getText(selection);
     const editId = `edit-${Date.now()}`;
@@ -65,6 +65,7 @@ export class InlineEditProvider {
         this.rejectEdit(editId);
         break;
     }
+    return action;
   }
 
   private async applyEdit(editId: string): Promise<void> {
@@ -149,7 +150,7 @@ interface PendingEdit {
 }
 
 class InlineContentProvider implements vscode.TextDocumentContentProvider {
-  constructor(private content: string) {}
+  constructor(private content: string) { }
 
   provideTextDocumentContent(): string {
     return this.content;

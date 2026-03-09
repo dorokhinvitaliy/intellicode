@@ -1323,6 +1323,11 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
           break;
         }
 
+        case 'logUserIntent':
+          if (welcomeEl) welcomeEl.style.display = 'none';
+          addMessage('user', msg.text);
+          break;
+
         case 'userQuestion':
           inputEl.value = msg.text;
           sendMessage();

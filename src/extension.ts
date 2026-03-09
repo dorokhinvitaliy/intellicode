@@ -120,6 +120,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       });
 
       if (instruction) {
+        sidebarProvider.postMessageToWebview({
+          type: 'logUserIntent',
+          text: `Написать код: ${instruction}`,
+        });
+        sidebarProvider.postMessageToWebview({ type: 'thinking', show: true });
+
         try {
           const response = await chatHandler.generateCode(
             instruction,
@@ -127,12 +133,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             editor.document.languageId,
             editor.document.fileName
           );
+          sidebarProvider.postMessageToWebview({ type: 'thinking', show: false });
           sidebarProvider.postMessageToWebview({
             type: 'codeGenerated',
             code: response.code,
             explanation: response.explanation,
           });
         } catch (err) {
+          sidebarProvider.postMessageToWebview({ type: 'thinking', show: false });
           const errMsg = err instanceof Error ? err.message : String(err);
           vscode.window.showErrorMessage(`IntelliCode Fabric: ${errMsg}`);
         }
@@ -153,6 +161,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       });
 
       if (instruction) {
+        sidebarProvider.postMessageToWebview({
+          type: 'logUserIntent',
+          text: `Переписать фрагмент: ${instruction}`,
+        });
+        sidebarProvider.postMessageToWebview({ type: 'thinking', show: true });
+
         try {
           const result = await orchestrator.runRefactorAgent(
             selectedText,
@@ -160,8 +174,20 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             editor.document.languageId,
             editor.document.fileName
           );
-          await inlineEditor.proposeEdit(editor, selection, result.refactoredCode);
+          sidebarProvider.postMessageToWebview({ type: 'thinking', show: false });
+
+          const action = await inlineEditor.proposeEdit(editor, selection, result.refactoredCode);
+          if (action) {
+            sidebarProvider.postMessageToWebview({
+              type: 'operationResult',
+              result: {
+                success: action === 'Accept',
+                message: `Правки рефакторинга: ${action}`
+              }
+            });
+          }
         } catch (err) {
+          sidebarProvider.postMessageToWebview({ type: 'thinking', show: false });
           const errMsg = err instanceof Error ? err.message : String(err);
           vscode.window.showErrorMessage(`IntelliCode Fabric: ${errMsg}`);
         }
@@ -176,11 +202,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
       const selectedText = editor.document.getText(editor.selection);
       try {
+        sidebarProvider.postMessageToWebview({
+          type: 'logUserIntent',
+          text: `Сгенерировать тесты для выделенного кода`,
+        });
+        sidebarProvider.postMessageToWebview({ type: 'thinking', show: true });
+
         const result = await orchestrator.runTestGeneratorAgent(
           selectedText,
           editor.document.languageId,
           editor.document.fileName
         );
+        sidebarProvider.postMessageToWebview({ type: 'thinking', show: false });
 
         const testDoc = await vscode.workspace.openTextDocument({
           content: result.testCode,
@@ -188,6 +221,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         });
         await vscode.window.showTextDocument(testDoc, vscode.ViewColumn.Beside);
       } catch (err) {
+        sidebarProvider.postMessageToWebview({ type: 'thinking', show: false });
         const errMsg = err instanceof Error ? err.message : String(err);
         vscode.window.showErrorMessage(`IntelliCode Fabric: ${errMsg}`);
       }
@@ -205,6 +239,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       });
 
       if (instruction) {
+        sidebarProvider.postMessageToWebview({
+          type: 'logUserIntent',
+          text: `Inline-редактирование: ${instruction}`,
+        });
+        sidebarProvider.postMessageToWebview({ type: 'thinking', show: true });
+
         try {
           const selectedText = editor.document.getText(editor.selection);
           const result = await chatHandler.generateCode(
@@ -213,8 +253,20 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             editor.document.languageId,
             editor.document.fileName
           );
-          await inlineEditor.proposeEdit(editor, editor.selection, result.code);
+          sidebarProvider.postMessageToWebview({ type: 'thinking', show: false });
+
+          const action = await inlineEditor.proposeEdit(editor, editor.selection, result.code);
+          if (action) {
+            sidebarProvider.postMessageToWebview({
+              type: 'operationResult',
+              result: {
+                success: action === 'Accept',
+                message: `Inline правки: ${action}`
+              }
+            });
+          }
         } catch (err) {
+          sidebarProvider.postMessageToWebview({ type: 'thinking', show: false });
           const errMsg = err instanceof Error ? err.message : String(err);
           vscode.window.showErrorMessage(`IntelliCode Fabric: ${errMsg}`);
         }
@@ -228,17 +280,25 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (!editor) { return; }
 
       try {
+        sidebarProvider.postMessageToWebview({
+          type: 'logUserIntent',
+          text: `Объяснить выделенный кусок кода...`,
+        });
+        sidebarProvider.postMessageToWebview({ type: 'thinking', show: true });
+
         const selectedText = editor.document.getText(editor.selection);
         const explanation = await chatHandler.explainCode(
           selectedText,
           editor.document.languageId,
           editor.document.fileName
         );
+        sidebarProvider.postMessageToWebview({ type: 'thinking', show: false });
         sidebarProvider.postMessageToWebview({
           type: 'explanation',
           text: explanation,
         });
       } catch (err) {
+        sidebarProvider.postMessageToWebview({ type: 'thinking', show: false });
         const errMsg = err instanceof Error ? err.message : String(err);
         vscode.window.showErrorMessage(`IntelliCode Fabric: ${errMsg}`);
       }
