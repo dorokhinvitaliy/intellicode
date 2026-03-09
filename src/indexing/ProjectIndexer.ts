@@ -240,6 +240,9 @@ export class ProjectIndexer {
         // Пропускаем игнорируемые файлы
         if (ProjectIndexer.IGNORE_FILES.has(entry.name)) { continue; }
 
+        // Проверяем пользовательские exclude паттерны
+        if (this.isExcluded(entry.name)) { continue; }
+
         const ext = path.extname(entry.name);
         if (!ProjectIndexer.SUPPORTED_EXTENSIONS.has(ext)) { continue; }
 
@@ -263,8 +266,18 @@ export class ProjectIndexer {
 
   private isExcluded(name: string): boolean {
     for (const pattern of this.config.excludePatterns) {
-      const cleaned = pattern.replace(/\*\*/g, '').replace(/\*/g, '').replace(/\//g, '');
-      if (cleaned && name === cleaned) { return true; }
+      if (!pattern) continue;
+      // Convert basic glob to regex
+      const regexPattern = pattern
+        .replace(/\./g, '\\.')
+        .replace(/\*\*/g, '.*')
+        .replace(/\*/g, '[^/]*')
+        .replace(/\?/g, '.');
+
+      const regex = new RegExp(`^${regexPattern}$`, 'i');
+      if (regex.test(name)) {
+        return true;
+      }
     }
     return false;
   }

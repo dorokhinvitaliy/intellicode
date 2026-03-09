@@ -110,8 +110,11 @@ export class FileOperationsHandler {
       });
     }
 
-    // Fallback: if no operations found but code blocks with file paths exist
-    if (operations.length === 0) {
+    // Fallback: if no explicit CREATE/EDIT/EXECUTE operations found,
+    // and the AI is NOT actively using a READ_FILE marker (which means it knows about markers
+    // and is just investigating before editing in the next loop), parse code blocks.
+    const hasReadMarker = /<<<\s*READ_FILE/i.test(response);
+    if (operations.length === 0 && !hasReadMarker) {
       operations.push(...this.extractFromCodeBlocks(response));
     }
 

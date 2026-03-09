@@ -28,8 +28,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     embeddingModel: config.get<string>('embeddingModel', 'text-embedding-3-small'),
   });
 
+  // ─── Генерация уникального ID воркспейса ───
+  let workspaceId = 'default';
+  if (vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0) {
+    const rootPath = vscode.workspace.workspaceFolders[0].uri.fsPath;
+    workspaceId = Buffer.from(rootPath).toString('base64').replace(/[^a-zA-Z0-9]/g, '').substring(0, 16);
+  }
+
   // ─── Инициализация векторного хранилища и индексатора ───
-  const vectorStore = new VectorStore(context.globalStorageUri.fsPath);
+  const vectorStore = new VectorStore(context.globalStorageUri.fsPath, workspaceId);
   indexer = new ProjectIndexer(vectorStore, llmClient, {
     excludePatterns: config.get<string[]>('excludePatterns', []),
     chunkSize: config.get<number>('chunkSize', 512),

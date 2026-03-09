@@ -27,10 +27,12 @@ export interface SearchResult {
 export class VectorStore {
   private chunks: Map<string, CodeChunk> = new Map();
   private storagePath: string;
+  private workspaceId: string;
   private isDirty = false;
 
-  constructor(storagePath: string) {
+  constructor(storagePath: string, workspaceId: string) {
     this.storagePath = storagePath;
+    this.workspaceId = workspaceId;
     this.loadFromDisk();
   }
 
@@ -232,12 +234,12 @@ export class VectorStore {
     }
 
     const data = JSON.stringify(Array.from(this.chunks.entries()), null, 0);
-    fs.writeFileSync(path.join(dir, 'vector_store.json'), data, 'utf-8');
+    fs.writeFileSync(path.join(dir, `vector_store_${this.workspaceId}.json`), data, 'utf-8');
     this.isDirty = false;
   }
 
   private loadFromDisk(): void {
-    const filePath = path.join(this.storagePath, 'vector_store.json');
+    const filePath = path.join(this.storagePath, `vector_store_${this.workspaceId}.json`);
     if (!fs.existsSync(filePath)) return;
 
     try {
@@ -245,7 +247,7 @@ export class VectorStore {
       const entries = JSON.parse(data);
       this.chunks = new Map(entries);
     } catch {
-      console.warn('Не удалось загрузить vector store, создаём новый');
+      console.warn(`Не удалось загрузить vector store проека ${this.workspaceId}, создаём новый`);
       this.chunks = new Map();
     }
   }
