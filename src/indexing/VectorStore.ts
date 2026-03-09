@@ -185,6 +185,10 @@ export class VectorStore {
     return results.sort((a, b) => a.startLine - b.startLine);
   }
 
+  getAllChunks(): CodeChunk[] {
+    return Array.from(this.chunks.values());
+  }
+
   getDependencyGraph(): Map<string, string[]> {
     const graph = new Map<string, string[]>();
 

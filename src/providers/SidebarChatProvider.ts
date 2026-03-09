@@ -119,15 +119,16 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
             this.postMessageToWebview({ type: 'token', text: chunk.data });
             break;
           case 'done': {
-            // Only parse markers for command-type messages, not questions
+            // Handle READ_FILE operations for ALL types of requests
+            // (Even for questions, the AI might need to read a file to answer)
+            const readFileOps = this.parseReadFileOps(chunk.data);
+            if (readFileOps.length > 0) {
+              await this.handleReadFiles(readFileOps);
+            }
+
+            // Only parse other command markers (CREATE/EDIT/EXECUTE) for command-type messages, not questions
             if (!isQuestion) {
               const ops = this.fileOps.parseOperationsFromResponse(chunk.data);
-
-              // Handle READ_FILE operations
-              const readFileOps = this.parseReadFileOps(chunk.data);
-              if (readFileOps.length > 0) {
-                await this.handleReadFiles(readFileOps);
-              }
 
               const actionOps = ops.filter(op => !(op.type === 'execute' && op.command?.startsWith('READ_FILE:')));
               if (actionOps.length > 0) {
@@ -336,7 +337,19 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
     const rootPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
     const fileContents: string[] = [];
 
-    for (const fp of filePaths) {
+    for (let fp of filePaths) {
+      let normalizedPath = fp.replace(/\\/g, '/');
+      const normalizedRoot = rootPath.replace(/\\/g, '/');
+      if (normalizedPath.startsWith(normalizedRoot)) {
+        normalizedPath = normalizedPath.substring(normalizedRoot.length);
+      } else {
+        const rootWithoutSlash = normalizedRoot.startsWith('/') ? normalizedRoot.substring(1) : normalizedRoot;
+        if (normalizedPath.startsWith(rootWithoutSlash)) {
+          normalizedPath = normalizedPath.substring(rootWithoutSlash.length);
+        }
+      }
+      fp = normalizedPath.replace(/^[/\\]+/, '');
+
       const fullPath = path.join(rootPath, fp);
       try {
         if (fs.existsSync(fullPath)) {

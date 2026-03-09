@@ -213,7 +213,7 @@ export class FileOperationsHandler {
       return { success: false, message: 'Рабочая папка не открыта' };
     }
 
-    const fullPath = path.join(rootPath, op.filePath);
+    const fullPath = this.resolveFilePath(op.filePath, rootPath);
     const exists = fs.existsSync(fullPath);
 
     try {
@@ -244,7 +244,7 @@ export class FileOperationsHandler {
       return { success: false, message: 'Рабочая папка не открыта' };
     }
 
-    const fullPath = path.join(rootPath, op.filePath);
+    const fullPath = this.resolveFilePath(op.filePath, rootPath);
 
     if (!fs.existsSync(fullPath)) {
       return { success: false, message: `Файл не найден: ${op.filePath}` };
@@ -271,7 +271,7 @@ export class FileOperationsHandler {
       return { success: false, message: 'Рабочая папка не открыта' };
     }
 
-    const fullPath = path.join(rootPath, op.filePath);
+    const fullPath = this.resolveFilePath(op.filePath, rootPath);
     const exists = fs.existsSync(fullPath);
 
     // Показываем содержимое файла для ревью
@@ -320,7 +320,7 @@ export class FileOperationsHandler {
       return { success: false, message: 'Рабочая папка не открыта' };
     }
 
-    const fullPath = path.join(rootPath, op.filePath);
+    const fullPath = this.resolveFilePath(op.filePath, rootPath);
 
     if (!fs.existsSync(fullPath)) {
       return { success: false, message: `Файл не найден: ${op.filePath}` };
@@ -385,7 +385,7 @@ export class FileOperationsHandler {
       return { success: false, message: 'Рабочая папка не открыта' };
     }
 
-    const fullPath = path.join(rootPath, op.filePath);
+    const fullPath = this.resolveFilePath(op.filePath, rootPath);
 
     if (!fs.existsSync(fullPath)) {
       return { success: false, message: `Файл не найден: ${op.filePath}` };
@@ -554,5 +554,32 @@ export class FileOperationsHandler {
       '.sh': 'shellscript', '.bash': 'shellscript',
     };
     return map[ext] || 'plaintext';
+  }
+
+  /**
+   * Убеждается, что переданный путь является относительным к корню проекта.
+   * Удаляет абсолютные префиксы путей, если AI по ошибке прислал абсолютный путь.
+   */
+  private resolveFilePath(filePath: string, rootPath: string): string {
+    // Нормализация сепараторов
+    let normalizedPath = filePath.replace(/\\/g, '/');
+    const normalizedRoot = rootPath.replace(/\\/g, '/');
+
+    // Если AI отправил путь, который уже начинается с rootPath
+    if (normalizedPath.startsWith(normalizedRoot)) {
+      normalizedPath = normalizedPath.substring(normalizedRoot.length);
+    }
+    // Либо если путь начинается с rootPath, но без начального слэша
+    else {
+      const rootWithoutSlash = normalizedRoot.startsWith('/') ? normalizedRoot.substring(1) : normalizedRoot;
+      if (normalizedPath.startsWith(rootWithoutSlash)) {
+        normalizedPath = normalizedPath.substring(rootWithoutSlash.length);
+      }
+    }
+
+    // Удаляем все ведущие слэши, чтобы path.join не считал его абсолютным
+    normalizedPath = normalizedPath.replace(/^[/\\]+/, '');
+
+    return path.join(rootPath, normalizedPath);
   }
 }

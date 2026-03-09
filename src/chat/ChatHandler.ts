@@ -52,14 +52,16 @@ GENERAL RULES
    → DO NOT use markers.
 
 2. COMMAND requests (create, edit, run, fix, install):
-   → Perform the action using markers.
-   → DO NOT give instructions to the user.
+   → You MUST ALWAYS perform the action using markers.
+   → DO NOT give step-by-step instructions to the user.
+   → DO NOT write commands in markdown code blocks like \`\`\`bash npm run dev \`\`\`. You MUST use <<<EXECUTE command="npm run dev"/>>>.
 
 3. NEVER say:
    - "create this file manually"
    - "run this command yourself"
+   - "Here are the steps to run..."
 
-   You must perform actions using markers.
+   You MUST perform actions directly using EXECUTE or FILE markers.
 
 4. ALWAYS check project files before guessing commands.
 

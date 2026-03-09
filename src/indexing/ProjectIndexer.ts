@@ -151,7 +151,7 @@ export class ProjectIndexer {
     await this.vectorStore.addChunks(allChunks);
     await this.vectorStore.saveToDisk();
 
-    this.stats.totalChunks = allChunks.length;
+    this.stats.totalChunks = this.vectorStore.getAllChunks().length;
     this.stats.indexedFiles = files;
     this.stats.lastIndexed = new Date();
   }
