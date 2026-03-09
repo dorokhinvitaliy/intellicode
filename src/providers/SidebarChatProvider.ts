@@ -158,7 +158,7 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
    */
   private parseReadFileOps(response: string): string[] {
     const paths: string[] = [];
-    const regex = /<<<\s*READ_FILE\s+path="([^"]+)"\s*\/?>>>/gi;
+    const regex = /<<<\s*READ_FILE\s+path="([^"]+)"\s*\/?>+/gi;
     let match;
     while ((match = regex.exec(response)) !== null) {
       paths.push(match[1]);
@@ -186,12 +186,17 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
       const terminals = vscode.window.terminals.filter(
         t => t.name.startsWith('IntelliCode:')
       );
+      // Kill tracked background processes (spawn)
+      const killedProcesses = this.fileOps.killAllProcesses();
       const messages: string[] = [];
       if (terminals.length > 0) {
         for (const t of terminals) {
           t.dispose();
         }
-        messages.push(`Остановлено ${terminals.length} терминал(ов).`);
+      }
+      const totalKilled = terminals.length + killedProcesses;
+      if (totalKilled > 0) {
+        messages.push(`Остановлено ${totalKilled} процесс(ов).`);
       }
 
       // Only offer docker-compose if:
@@ -887,19 +892,19 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
       var SS = String.fromCharCode(92) + 'S'; // \S for regex
       var SL = String.fromCharCode(92) + '/'; // \/ for regex
       // CREATE_FILE and EDIT_FILE blocks (with content)
-      text = text.replace(new RegExp(L + '{2,}' + S + '*(?:CREATE|EDIT)_FILE' + S + '+path="[^"]*"' + S + '*' + R + '{2,}[' + S + SS + ']*?(?:' + L + '{2,}' + S + '*(?:END_FILE|/(?:CREATE|EDIT)_FILE)' + S + '*' + R + '{2,}|$)', 'gi'), '');
+      text = text.replace(new RegExp(L + '{1,}' + S + '*(?:CREATE|EDIT)_FILE' + S + '+path="[^"]*"' + S + '*' + R + '{2,}[' + S + SS + ']*?(?:' + L + '{1,}' + S + '*(?:END_FILE|/(?:CREATE|EDIT)_FILE)' + S + '*' + R + '{2,}|$)', 'gi'), '');
       // DELETE_FILE
-      text = text.replace(new RegExp(L + '{2,}' + S + '*DELETE_FILE' + S + '+path="[^"]*"' + S + '*' + SL + '?' + S + '*' + R + '{2,}', 'gi'), '');
+      text = text.replace(new RegExp(L + '{1,}' + S + '*DELETE_FILE' + S + '+path="[^"]*"' + S + '*' + SL + '?' + S + '*' + R + '{1,}', 'gi'), '');
       // EXECUTE
-      text = text.replace(new RegExp(L + '{2,}' + S + '*EXECUTE' + S + '+command="[^"]*"' + S + '*' + SL + '?' + S + '*' + R + '{2,}', 'gi'), '');
+      text = text.replace(new RegExp(L + '{1,}' + S + '*EXECUTE' + S + '+command="[^"]*"' + S + '*' + SL + '?' + S + '*' + R + '{1,}', 'gi'), '');
       // READ_FILE
-      text = text.replace(new RegExp(L + '{2,}' + S + '*READ_FILE' + S + '+path="[^"]*"' + S + '*' + SL + '?' + S + '*' + R + '{2,}', 'gi'), '');
+      text = text.replace(new RegExp(L + '{1,}' + S + '*READ_FILE' + S + '+path="[^"]*"' + S + '*' + SL + '?' + S + '*' + R + '{1,}', 'gi'), '');
       // END_FILE orphans
-      text = text.replace(new RegExp(L + '{2,}' + S + '*(?:END_FILE|/(?:CREATE|EDIT)_FILE)' + S + '*' + R + '{2,}', 'gi'), '');
+      text = text.replace(new RegExp(L + '{1,}' + S + '*(?:END_FILE|/(?:CREATE|EDIT)_FILE)' + S + '*' + R + '{1,}', 'gi'), '');
       // XML-style closing: </CREATE_FILE>
       text = text.replace(new RegExp(L + '/(?:CREATE_FILE|EDIT_FILE|DELETE_FILE|EXECUTE|READ_FILE|END_FILE)' + S + '*' + R, 'gi'), '');
       // Partial markers at end of stream
-      text = text.replace(new RegExp(L + '{2,}' + S + '*(?:CREATE_FILE|EDIT_FILE|DELETE_FILE|EXECUTE|READ_FILE)[^' + R + ']*$', 'gi'), '');
+      text = text.replace(new RegExp(L + '{1,}' + S + '*(?:CREATE_FILE|EDIT_FILE|DELETE_FILE|EXECUTE|READ_FILE)[^' + R + ']*$', 'gi'), '');
       // Stray << or <<<
       text = text.replace(new RegExp(L + '{2,}' + S + '*$', 'g'), '');
       return text.trim();

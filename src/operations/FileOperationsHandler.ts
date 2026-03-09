@@ -23,7 +23,18 @@ export interface OperationResult {
  * но КАЖДОЕ действие требует явного подтверждения.
  */
 export class FileOperationsHandler {
+  // Track spawned background processes for stop commands
+  private static runningProcesses: Map<string, cp.ChildProcess> = new Map();
 
+  /** Kill all tracked background processes. Returns count killed. */
+  public killAllProcesses(): number {
+    const count = FileOperationsHandler.runningProcesses.size;
+    for (const [cmd, child] of FileOperationsHandler.runningProcesses) {
+      child.kill();
+    }
+    FileOperationsHandler.runningProcesses.clear();
+    return count;
+  }
   /**
    * Выполняет операцию с одобрением пользователя.
    * Возвращает результат операции.
@@ -57,30 +68,30 @@ export class FileOperationsHandler {
     // CREATE_FILE
     // Allows 2+ brackets: >> or >>>
     // Allows missing END_FILE (matches to end of string or next block)
-    const createRegex = /<<<\s*CREATE_FILE\s+path="([^"]+)"\s*>{2,}([\s\S]*?)(?:<<<\s*END_FILE\s*>{2,}|$|(?=<<<\s*(?:CREATE|EDIT|DELETE|EXECUTE)))/gi;
+    const createRegex = /<<<\s*CREATE_FILE\s+path="([^"]+)"\s*>{1,}([\s\S]*?)(?:<<<\s*END_FILE\s*>{1,}|$|(?=<<<\s*(?:CREATE|EDIT|DELETE|EXECUTE)))/gi;
     let match;
     while ((match = createRegex.exec(response)) !== null) {
       operations.push({
         type: 'create',
         filePath: match[1],
-        content: match[2].trim(),
+        content: this.stripMarkdownFences(match[2].trim()),
         description: `Создать файл: ${match[1]}`,
       });
     }
 
     // EDIT_FILE
-    const editRegex = /<<<\s*EDIT_FILE\s+path="([^"]+)"\s*>{2,}([\s\S]*?)(?:<<<\s*END_FILE\s*>{2,}|$|(?=<<<\s*(?:CREATE|EDIT|DELETE|EXECUTE)))/gi;
+    const editRegex = /<<<\s*EDIT_FILE\s+path="([^"]+)"\s*>{1,}([\s\S]*?)(?:<<<\s*END_FILE\s*>{1,}|$|(?=<<<\s*(?:CREATE|EDIT|DELETE|EXECUTE)))/gi;
     while ((match = editRegex.exec(response)) !== null) {
       operations.push({
         type: 'edit',
         filePath: match[1],
-        content: match[2].trim(),
+        content: this.stripMarkdownFences(match[2].trim()),
         description: `Редактировать файл: ${match[1]}`,
       });
     }
 
     // DELETE_FILE
-    const deleteRegex = /<<<\s*DELETE_FILE\s+path="([^"]+)"\s*\/?\s*>{2,}/gi;
+    const deleteRegex = /<<<\s*DELETE_FILE\s+path="([^"]+)"\s*\/?\s*>{1,}/gi;
     while ((match = deleteRegex.exec(response)) !== null) {
       operations.push({
         type: 'delete',
@@ -90,7 +101,7 @@ export class FileOperationsHandler {
     }
 
     // EXECUTE
-    const execRegex = /<<<\s*EXECUTE\s+command="([^"]+)"\s*\/?\s*>{2,}/gi;
+    const execRegex = /<<<\s*EXECUTE\s+command="([^"]+)"\s*\/?\s*>{1,}/gi;
     while ((match = execRegex.exec(response)) !== null) {
       operations.push({
         type: 'execute',
@@ -108,6 +119,18 @@ export class FileOperationsHandler {
   }
 
   /**
+   * Strip markdown code fences from file content.
+   * Models often wrap code in ```typescript...``` even inside CREATE_FILE markers.
+   */
+  private stripMarkdownFences(content: string): string {
+    // Remove opening fence: ```language or just ```
+    let cleaned = content.replace(/^```[\w]*\s*\n?/, '');
+    // Remove closing fence: ```
+    cleaned = cleaned.replace(/\n?```\s*$/, '');
+    return cleaned.trim();
+  }
+
+  /**
    * Fallback: extracts file operations from markdown code blocks
    * where the first line or the language block contains a file path.
    * Format: ```typescript:src/file.ts
@@ -115,20 +138,47 @@ export class FileOperationsHandler {
    */
   private extractFromCodeBlocks(response: string): FileOperation[] {
     const operations: FileOperation[] = [];
-    const codeBlockRegex = /```[\w-]*[:\s]+([a-zA-Z0-9_\-\./\\]+\.[a-zA-Z0-9]+)\s*\n([\s\S]*?)```/g;
+    let m: RegExpExecArray | null;
 
-    let match;
-    while ((match = codeBlockRegex.exec(response)) !== null) {
-      const filePath = match[1].trim();
-      const content = match[2].trim();
-
+    // Pattern 1: tagged code blocks like ```ts:path/file.ts
+    const tagged = /```[\w-]*[:\s]+([a-zA-Z0-9_.\-/\\]+\.[a-zA-Z0-9]+)\s*\n([\s\S]*?)```/g;
+    while ((m = tagged.exec(response)) !== null) {
       operations.push({
-        // Defaulting to 'edit', executeDirect will decide to create if it doesn't exist
         type: 'edit',
-        filePath,
-        content,
-        description: `Редактировать/Создать файл: ${filePath}`,
+        filePath: m[1].trim(),
+        content: this.stripMarkdownFences(m[2].trim()),
+        description: `Create/Edit: ${m[1].trim()}`,
       });
+    }
+
+    // Pattern 2: detect filename mentions + code blocks (model forgot markers)
+    if (operations.length === 0) {
+      const fileNames: string[] = [];
+      const fnRe = /([a-zA-Z0-9_.\-/\\]+\.(?:ts|tsx|js|jsx|py|java|css|html|json|xml|yaml|yml|go|rs|rb|php|c|cpp|h|vue|svelte))\b/gi;
+      while ((m = fnRe.exec(response)) !== null) {
+        const fn = m[1];
+        if (!fn.startsWith('node_modules') && !fn.includes('package.json') && !fn.includes('pom.xml')) {
+          fileNames.push(fn);
+        }
+      }
+
+      const codeBlocks: string[] = [];
+      const cbRe = /```[\w]*\s*\n([\s\S]*?)```/g;
+      while ((m = cbRe.exec(response)) !== null) {
+        codeBlocks.push(m[1].trim());
+      }
+
+      // Deduplicate filenames (keep first occurrence)
+      const uniqueFiles = [...new Set(fileNames)];
+      const n = Math.min(uniqueFiles.length, codeBlocks.length);
+      for (let i = 0; i < n; i++) {
+        operations.push({
+          type: 'edit',
+          filePath: uniqueFiles[i],
+          content: this.stripMarkdownFences(codeBlocks[i]),
+          description: `Create/Edit: ${uniqueFiles[i]}`,
+        });
+      }
     }
 
     return operations;
@@ -409,6 +459,12 @@ export class FileOperationsHandler {
         child.stdout.on('data', appendOutput);
         child.stderr.on('data', appendOutput);
 
+        // Track this process for stop commands
+        FileOperationsHandler.runningProcesses.set(op.command!, child);
+        child.on('exit', () => {
+          FileOperationsHandler.runningProcesses.delete(op.command!);
+        });
+
         child.on('error', (err) => {
           if (!resolved) {
             resolved = true;
@@ -440,26 +496,15 @@ export class FileOperationsHandler {
         });
 
         // Wait 5 seconds for initial output, then resolve as "running"
+        // Keep spawn alive — do NOT open a second terminal
         setTimeout(() => {
           if (!resolved) {
             resolved = true;
-
-            // Also open a terminal for live monitoring
-            const terminal = vscode.window.createTerminal({
-              name: `IntelliCode: ${op.command}`,
-              cwd: rootPath,
-            });
-            terminal.show();
-            terminal.sendText(op.command!);
-
             resolve({
               success: true,
               message: `Команда запущена: ${op.command}`,
               output: output || '(сервер запускается...)',
             });
-
-            // Kill the spawn (terminal takes over)
-            child.kill();
           }
         }, 5000);
       });
