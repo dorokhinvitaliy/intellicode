@@ -10,6 +10,7 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
   private chatHandler: ChatHandler;
   private indexer: ProjectIndexer;
   private fileOps: FileOperationsHandler;
+  private inlineEditor?: any;
   private feedbackDepth = 0;
   private lastUserQuery = '';
 
@@ -22,6 +23,10 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
     this.chatHandler = chatHandler;
     this.indexer = indexer;
     this.fileOps = fileOps;
+  }
+
+  public setInlineEditor(editor: any) {
+    this.inlineEditor = editor;
   }
 
   resolveWebviewView(
@@ -75,6 +80,11 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
           vscode.commands.executeCommand(
             'workbench.action.openSettings', 'intellicodeFabric'
           );
+          break;
+        case 'inlineEditDecision':
+          if (this.inlineEditor) {
+            this.inlineEditor.resolveEdit(message.editId, message.action);
+          }
           break;
       }
     });
@@ -1153,6 +1163,17 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
       btn.previousElementSibling.style.color = 'var(--fg-dim)';
     }
 
+    function submitInlineEdit(btn, editId, action) {
+      vscode.postMessage({ type: 'inlineEditDecision', editId: editId, action: action });
+      if (action !== 'Show Diff') {
+        var item = btn.closest('.file-ops');
+        if (item) {
+          item.style.opacity = '0.5';
+          item.style.pointerEvents = 'none';
+        }
+      }
+    }
+
     // ─── Actions ────────────────────────────
 
     function indexProject() { vscode.postMessage({ type: 'indexProject' }); }
@@ -1262,6 +1283,29 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
           resDiv.className = 'op-result ' + cls;
           resDiv.innerHTML = icon + '<span>' + escapeHtml(msg.result.message) + '</span>';
           messagesEl.appendChild(resDiv);
+          messagesEl.scrollTop = messagesEl.scrollHeight;
+          break;
+        }
+
+        case 'inlineEditProposal': {
+          var div = document.createElement('div');
+          div.className = 'file-ops';
+          var html = '<div class="file-ops-title">' +
+            '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>' +
+            'Inline-редактирование (предложено)' +
+          '</div>' +
+          '<div class="file-op-item" style="flex-wrap: wrap;">' +
+            '<span class="file-op-desc" style="width: 100%; margin-bottom: 8px;">' + escapeHtml(msg.description) + '</span>' +
+            '<div style="display:flex;gap:6px;width:100%;">' +
+              '<button class="file-op-approve" style="flex:1" onclick="submitInlineEdit(this, \\'' + msg.editId + '\\', \\'Accept\\')">Accept</button>' +
+              '<button class="file-op-reject" style="flex:1" onclick="submitInlineEdit(this, \\'' + msg.editId + '\\', \\'Reject\\')">Reject</button>' +
+              '<button class="code-btn" style="flex:1;justify-content:center" onclick="submitInlineEdit(this, \\'' + msg.editId + '\\', \\'Show Diff\\')">' +
+                '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h6v6"/><path d="M9 21H3v-6"/><path d="M21 3l-7 7"/><path d="M3 21l7-7"/></svg> Diff' +
+              '</button>' +
+            '</div>' +
+          '</div>';
+          div.innerHTML = html;
+          messagesEl.appendChild(div);
           messagesEl.scrollTop = messagesEl.scrollHeight;
           break;
         }

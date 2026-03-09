@@ -10,6 +10,8 @@ export class InlineEditProvider {
   private llmClient: LLMClient;
   private decorationType: vscode.TextEditorDecorationType;
   private pendingEdits: Map<string, PendingEdit> = new Map();
+  private sidebarProvider: any = null;
+  private resolutionMap: Map<string, (action: 'Accept' | 'Reject' | 'Show Diff') => void> = new Map();
 
   constructor(llmClient: LLMClient) {
     this.llmClient = llmClient;
@@ -19,6 +21,10 @@ export class InlineEditProvider {
       border: '1px solid rgba(100, 200, 100, 0.4)',
       borderRadius: '3px',
     });
+  }
+
+  setSidebarProvider(provider: any) {
+    this.sidebarProvider = provider;
   }
 
   getLLMClient(): LLMClient {
@@ -45,27 +51,57 @@ export class InlineEditProvider {
 
     await this.showDiffPreview(pendingEdit);
 
-    const action = await vscode.window.showInformationMessage(
-      'IntelliCode Fabric: Accept proposed changes?',
-      { modal: false },
-      'Accept',
-      'Reject',
-      'Show Diff'
-    );
+    return new Promise<string | undefined>((resolve) => {
+      this.resolutionMap.set(editId, async (action) => {
+        switch (action) {
+          case 'Accept':
+            await this.applyEdit(editId);
+            resolve(action);
+            this.resolutionMap.delete(editId);
+            break;
+          case 'Show Diff':
+            await this.showDiffPreview(pendingEdit);
+            break;
+          case 'Reject':
+          default:
+            this.rejectEdit(editId);
+            resolve(action);
+            this.resolutionMap.delete(editId);
+            break;
+        }
+      });
 
-    switch (action) {
-      case 'Accept':
-        await this.applyEdit(editId);
-        break;
-      case 'Show Diff':
-        await this.showDiffPreview(pendingEdit);
-        break;
-      case 'Reject':
-      default:
-        this.rejectEdit(editId);
-        break;
+      if (this.sidebarProvider) {
+        const fileName = editor.document.fileName.split(/[\\/]/).pop() || 'file';
+        this.sidebarProvider.postMessageToWebview({
+          type: 'inlineEditProposal',
+          editId,
+          description: `AI предлагает изменения для ${fileName}`,
+        });
+      } else {
+        // Fallback если чат не открыт
+        vscode.window.showInformationMessage(
+          'IntelliCode Fabric: Accept proposed changes?',
+          { modal: false },
+          'Accept',
+          'Reject',
+          'Show Diff'
+        ).then(action => {
+          if (action) {
+            this.resolveEdit(editId, action as 'Accept' | 'Reject' | 'Show Diff');
+          } else {
+            this.resolveEdit(editId, 'Reject');
+          }
+        });
+      }
+    });
+  }
+
+  public resolveEdit(editId: string, action: 'Accept' | 'Reject' | 'Show Diff'): void {
+    const resolver = this.resolutionMap.get(editId);
+    if (resolver) {
+      resolver(action);
     }
-    return action;
   }
 
   private async applyEdit(editId: string): Promise<void> {

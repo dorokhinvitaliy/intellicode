@@ -62,6 +62,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     indexer,
     fileOps
   );
+  sidebarProvider.setInlineEditor(inlineEditor);
+  inlineEditor.setSidebarProvider(sidebarProvider);
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(
       'intellicodeFabric.chatView',
