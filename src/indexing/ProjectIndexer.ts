@@ -94,8 +94,25 @@ export class ProjectIndexer {
       });
 
       try {
-        const chunks = this.chunkFile(file);
-        allChunks.push(...chunks);
+        const stat = fs.statSync(file);
+        const lastModified = stat.mtimeMs;
+
+        // Caching: Skip if file hasn't changed since last index
+        let shouldIndex = true;
+        const existingChunks = this.vectorStore.getChunksForFile(file);
+        if (existingChunks.length > 0) {
+          const cachedMtime = existingChunks[0].metadata?.lastModified || 0;
+          if (cachedMtime === lastModified) {
+            shouldIndex = false;
+          }
+        }
+
+        if (shouldIndex) {
+          await this.vectorStore.removeByFile(file); // Clear old chunks
+          const chunks = this.chunkFile(file);
+          chunks.forEach(c => c.metadata.lastModified = lastModified);
+          allChunks.push(...chunks);
+        }
       } catch (err) {
         console.warn(`Ошибка обработки ${file}:`, err);
       }

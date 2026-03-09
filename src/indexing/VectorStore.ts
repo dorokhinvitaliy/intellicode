@@ -74,20 +74,93 @@ export class VectorStore {
     topK: number = 10
   ): Promise<SearchResult[]> {
     const results: SearchResult[] = [];
-    const queryTokens = this.tokenize(queryText.toLowerCase());
+    const lowerQuery = queryText.toLowerCase();
+    const queryTokens = this.tokenize(lowerQuery);
+
+    // Service-aware detection
+    const isFrontend = lowerQuery.includes('front') || lowerQuery.includes('client') || lowerQuery.includes('web') || lowerQuery.includes('ui');
+    const isBackend = lowerQuery.includes('back') || lowerQuery.includes('api') || lowerQuery.includes('server');
 
     for (const chunk of this.chunks.values()) {
       if (!chunk.embedding) continue;
 
+      const lowerPath = chunk.filePath.toLowerCase();
+
+      // 1. Base Scores
       const vectorScore = this.cosineSimilarity(queryEmbedding, chunk.embedding);
       const keywordScore = this.keywordScore(queryTokens, chunk.content.toLowerCase());
-      const combinedScore = 0.7 * vectorScore + 0.3 * keywordScore;
+
+      // 2. Symbol Score (if query mentions the exact symbol name)
+      let symbolScore = 0;
+      if (chunk.symbolName && lowerQuery.includes(chunk.symbolName.toLowerCase())) {
+        symbolScore = 1.0;
+      }
+
+      // 3. Path Match Score (if query mentions parts of the file path)
+      let pathMatchScore = 0;
+      let isExactFileMatch = false;
+      const pathParts = lowerPath.split(/[/\\]/);
+      const fileName = pathParts[pathParts.length - 1];
+      if (lowerQuery.includes(fileName)) {
+        pathMatchScore = 1.0;
+        isExactFileMatch = true;
+      } else {
+        const matchingTokens = queryTokens.filter(t => lowerPath.includes(t));
+        if (matchingTokens.length > 0) {
+          pathMatchScore = matchingTokens.length / queryTokens.length;
+        }
+      }
+
+      // 4. Combine base scores (Semantic 50%, Keyword 25%, Symbol 10%, Path 15%)
+      let combinedScore = (vectorScore * 0.5) + (keywordScore * 0.25) + (symbolScore * 0.1) + (pathMatchScore * 0.15);
+
+      // Massive boost for explicitly mentioning the file name in the query
+      if (isExactFileMatch) {
+        combinedScore += 5.0; // Guarantee this file is returned at the top
+      }
+
+      // 5. File Importance Boost
+      if (lowerPath.endsWith('package.json') || lowerPath.endsWith('readme.md') ||
+        lowerPath.includes('config') || lowerPath.endsWith('docker-compose.yml') ||
+        lowerPath.endsWith('makefile') || lowerPath.endsWith('pom.xml')) {
+        combinedScore += 0.15;
+      }
+
+      // 6. Service-Aware Boost
+      if (isFrontend && (lowerPath.includes('/front') || lowerPath.includes('/client') || lowerPath.includes('/web'))) {
+        combinedScore += 0.1;
+      }
+      if (isBackend && (lowerPath.includes('/back') || lowerPath.includes('/api') || lowerPath.includes('/server'))) {
+        combinedScore += 0.1;
+      }
 
       results.push({ chunk, score: combinedScore });
     }
 
+    // Sort by score descending
     results.sort((a, b) => b.score - a.score);
-    return results.slice(0, topK);
+
+    // 7. Diversity Filtering & Context Budget
+    const finalResults: SearchResult[] = [];
+    const fileCountMap = new Map<string, number>();
+    let totalChars = 0;
+    const MAX_CONTEXT_CHARS = 12000; // Total context budget
+
+    for (const result of results) {
+      if (finalResults.length >= topK || totalChars >= MAX_CONTEXT_CHARS) break;
+
+      const filePath = result.chunk.filePath;
+      const count = fileCountMap.get(filePath) || 0;
+
+      // Max 2 chunks per file for diversity
+      if (count >= 2) continue;
+
+      fileCountMap.set(filePath, count + 1);
+      finalResults.push(result);
+      totalChars += result.chunk.content.length;
+    }
+
+    return finalResults;
   }
 
   async searchBySymbol(symbolName: string): Promise<CodeChunk[]> {

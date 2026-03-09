@@ -280,12 +280,28 @@ Well, I have found certain command, then I should run the command inside of the 
     relevantFiles: string[];
     searchResults: SearchResult[];
   }> {
-    const queryEmbedding = await this.llmClient.createEmbedding(userMessage);
-    const searchResults = await this.vectorStore.hybridSearch(
-      queryEmbedding.embedding,
-      userMessage,
-      topK
-    );
+    const expandedQueries = this.expandQuery(userMessage);
+    const allResultsMap = new Map<string, SearchResult>();
+
+    // Search with expanded queries and merge by max score
+    for (const q of expandedQueries) {
+      const qEmbedding = await this.llmClient.createEmbedding(q);
+      const res = await this.vectorStore.hybridSearch(qEmbedding.embedding, q, topK);
+
+      for (const r of res) {
+        const existing = allResultsMap.get(r.chunk.id);
+        if (!existing || r.score > existing.score) {
+          allResultsMap.set(r.chunk.id, r);
+        }
+      }
+    }
+
+    // Sort combined results and take topK
+    const mergedResults = Array.from(allResultsMap.values())
+      .sort((a, b) => b.score - a.score)
+      .slice(0, topK);
+
+    let searchResults = mergedResults;
 
     const filteredResults = this.filterResults(searchResults);
     const context = this.buildContext(filteredResults);
@@ -309,6 +325,47 @@ Well, I have found certain command, then I should run the command inside of the 
     return { response, relevantFiles, searchResults: filteredResults };
   }
 
+  /**
+   * Expands the user query into multiple search queries to improve recall.
+   */
+  private expandQuery(query: string): string[] {
+    const lower = query.toLowerCase();
+    const expanded = [query];
+
+    // Intent: Run/Start
+    if (lower.includes('запусти') || lower.includes('запуск') || lower.includes('run') || lower.includes('start')) {
+      expanded.push('start dev serve package.json scripts');
+      if (lower.includes('фронт') || lower.includes('front')) {
+        expanded.push('frontend react vite vue start dev server');
+      }
+      if (lower.includes('бэк') || lower.includes('back') || lower.includes('api')) {
+        expanded.push('backend spring boot maven node server start');
+      }
+    }
+
+    // Intent: Error/Bug
+    if (lower.includes('ошибка') || lower.includes('баг') || lower.includes('error') || lower.includes('fix')) {
+      expanded.push('try catch throw error handler exception');
+    }
+
+    // Intent: Database
+    if (lower.includes('баз') || lower.includes('бд') || lower.includes('db') || lower.includes('database') || lower.includes('sql')) {
+      expanded.push('repository entity model schema query connection postgres redis');
+    }
+
+    // Intent: API/Network
+    if (lower.includes('api') || lower.includes('запрос') || lower.includes('fetch') || lower.includes('endpoint')) {
+      expanded.push('controller router axios fetch endpoint get post put delete');
+    }
+
+    // Intent: UI/Components
+    if (lower.includes('ui') || lower.includes('компонент') || lower.includes('кнопк') || lower.includes('component')) {
+      expanded.push('component render props state react html css');
+    }
+
+    return expanded;
+  }
+
   async *handleMessageStream(
     userMessage: string,
     topK: number = 15,
@@ -323,14 +380,28 @@ Well, I have found certain command, then I should run the command inside of the 
       ? `${retrievalQuery} ${userMessage}`
       : (retrievalQuery || userMessage);
 
-    const queryEmbedding = await this.llmClient.createEmbedding(searchQuery);
-    const searchResults = await this.vectorStore.hybridSearch(
-      queryEmbedding.embedding,
-      searchQuery,
-      topK
-    );
+    const expandedQueries = this.expandQuery(searchQuery);
+    const allResultsMap = new Map<string, SearchResult>();
 
-    const filteredResults = this.filterResults(searchResults);
+    // Search with expanded queries and merge by max score
+    for (const q of expandedQueries) {
+      const qEmbedding = await this.llmClient.createEmbedding(q);
+      const res = await this.vectorStore.hybridSearch(qEmbedding.embedding, q, topK);
+
+      for (const r of res) {
+        const existing = allResultsMap.get(r.chunk.id);
+        if (!existing || r.score > existing.score) {
+          allResultsMap.set(r.chunk.id, r);
+        }
+      }
+    }
+
+    // Sort combined results and take topK
+    const mergedResults = Array.from(allResultsMap.values())
+      .sort((a, b) => b.score - a.score)
+      .slice(0, topK);
+
+    let filteredResults = this.filterResults(mergedResults);
     const context = this.buildContext(filteredResults);
     const relevantFiles = [...new Set(filteredResults.map(r => r.chunk.filePath))];
 
