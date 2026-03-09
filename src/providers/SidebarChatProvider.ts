@@ -394,8 +394,8 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
       if (this.feedbackDepth < 1) {
         this.feedbackDepth++;
         const truncatedForAI = result.output.substring(0, 1000);
-        const statusWord = result.success ? 'completed successfully' : 'failed';
-        const commentary = `Command \`${operation.command}\` ${statusWord}. Output:\n\`\`\`\n${truncatedForAI}\n\`\`\`\nBriefly explain to the user what happened. If there's an error, explain the cause and suggest a fix. Be concise — 2-3 sentences max.`;
+        const statusWord = result.success ? 'успешно выполнена' : 'завершилась с ошибкой';
+        const commentary = `Команда \`${operation.command}\` ${statusWord}. Вывод:\n\`\`\`\n${truncatedForAI}\n\`\`\`\nКратко объясни пользователю на РУССКОМ ЯЗЫКЕ, что произошло. Если есть ошибка, объясни причину и предложи исправление. Будь краток — максимум 2-3 предложения.`;
         this.handleChatMessage(commentary, true).catch(() => { });
       }
     } else {
@@ -415,7 +415,7 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
       // Error feedback — fire-and-forget
       if (!result.success && this.feedbackDepth < 1) {
         this.feedbackDepth++;
-        const errorFeedback = `Operation failed: ${result.message}\n\nAnalyze this error and try a different approach.`;
+        const errorFeedback = `Операция не удалась: ${result.message}\n\nПроанализируй эту ошибку и предложи другое решение НА РУССКОМ ЯЗЫКЕ.`;
         this.handleChatMessage(errorFeedback, true).catch(() => { });
       }
     }
@@ -988,6 +988,8 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
       html = html.replace(/\`([^\`]+)\`/g, '<code>$1</code>');
 
       // Headers
+      html = html.replace(/^##### (.+)$/gm, '<h5>$1</h5>');
+      html = html.replace(/^#### (.+)$/gm, '<h4>$1</h4>');
       html = html.replace(/^### (.+)$/gm, '<h3>$1</h3>');
       html = html.replace(/^## (.+)$/gm, '<h2>$1</h2>');
       html = html.replace(/^# (.+)$/gm, '<h1>$1</h1>');
