@@ -14,6 +14,8 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
   private feedbackDepth = 0;
   private lastUserQuery = '';
 
+  private abortController?: AbortController;
+
   constructor(
     private readonly extensionUri: vscode.Uri,
     chatHandler: ChatHandler,
@@ -86,6 +88,10 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
             this.inlineEditor.resolveEdit(message.editId, message.action);
           }
           break;
+        case 'abortChat':
+          this.abortController?.abort();
+          this.postMessageToWebview({ type: 'thinking', show: false });
+          break;
       }
     });
   }
@@ -99,6 +105,11 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
     isFeedback: boolean = false
   ): Promise<void> {
     this.postMessageToWebview({ type: 'thinking', show: true });
+
+    // Cancel previous request if any
+    this.abortController?.abort();
+    this.abortController = new AbortController();
+    const signal = this.abortController.signal;
 
     // Detect if this is a question (not a command) — if so, skip marker parsing
     const isQuestion = !isFeedback && this.isQuestionMessage(text);
@@ -115,8 +126,9 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
     try {
       const retrievalQuery = isFeedback ? this.lastUserQuery : undefined;
       for await (const chunk of this.chatHandler.handleMessageStream(
-        enrichedText, 10, retrievalQuery, isFeedback
+        enrichedText, 15, retrievalQuery, isFeedback, signal
       )) {
+        if (signal.aborted) { break; }
         switch (chunk.type) {
           case 'context':
             this.postMessageToWebview({
@@ -153,7 +165,11 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
           }
         }
       }
-    } catch (error: unknown) {
+    } catch (error: any) {
+      if (error.name === 'AbortError') {
+        // Request aborted, do nothing
+        return;
+      }
       const errMsg = error instanceof Error ? error.message : String(error);
       this.postMessageToWebview({
         type: 'error',
@@ -769,6 +785,18 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
     .send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
     .send-btn svg { width: 18px; height: 18px; }
 
+    .stop-btn {
+      background: var(--error);
+      color: #fff;
+      border: none; border-radius: 6px;
+      padding: 0 12px; cursor: pointer;
+      display: none; align-items: center; justify-content: center;
+      gap: 6px; font-size: 11px; font-weight: 600;
+      transition: background 0.15s;
+    }
+    .stop-btn:hover { filter: brightness(1.1); }
+    .stop-btn svg { width: 14px; height: 14px; }
+
     /* ─── Welcome ─── */
     .welcome {
       text-align: center; padding: 20px 16px;
@@ -891,6 +919,12 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
           <polygon points="22 2 15 22 11 13 2 9 22 2"/>
         </svg>
       </button>
+      <button class="stop-btn" id="stopBtn" onclick="abortChat()" title="Остановить генерацию">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+        </svg>
+        Стоп
+      </button>
     </div>
   </div>
 
@@ -900,6 +934,7 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
     const inputEl = document.getElementById('input');
     const thinkingEl = document.getElementById('thinking');
     const sendBtn = document.getElementById('sendBtn');
+    const stopBtn = document.getElementById('stopBtn');
     const welcomeEl = document.getElementById('welcome');
     let currentAssistantEl = null;
     let currentAssistantText = '';
@@ -1051,9 +1086,22 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
       addMessage('user', text);
       inputEl.value = '';
       inputEl.style.height = '38px';
-      isStreaming = true;
-      sendBtn.disabled = true;
+      setStreamingState(true);
       vscode.postMessage({ type: 'chat', text: text });
+    }
+
+    function abortChat() {
+      vscode.postMessage({ type: 'abortChat' });
+      setStreamingState(false);
+    }
+
+    function setStreamingState(active) {
+      isStreaming = active;
+      sendBtn.style.display = active ? 'none' : 'flex';
+      stopBtn.style.display = active ? 'flex' : 'none';
+      if (!active) {
+        thinkingEl.style.display = 'none';
+      }
     }
 
     function handleKeyDown(e) {
@@ -1198,6 +1246,7 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
       switch(msg.type) {
         case 'thinking':
           thinkingEl.style.display = msg.show ? 'flex' : 'none';
+          if (msg.show) setStreamingState(true);
           break;
 
         case 'context': {
@@ -1254,8 +1303,7 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
         case 'done':
           currentAssistantEl = null;
           currentAssistantText = '';
-          isStreaming = false;
-          sendBtn.disabled = false;
+          setStreamingState(false);
           break;
 
         case 'error': {
@@ -1264,8 +1312,7 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
           errDiv.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>' +
             '<span>' + escapeHtml(msg.message) + '</span>';
           messagesEl.appendChild(errDiv);
-          isStreaming = false;
-          sendBtn.disabled = false;
+          setStreamingState(false);
           break;
         }
 
@@ -1378,15 +1425,13 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
           break;
 
         case 'codeGenerated':
-          addMessage('assistant', msg.explanation + '\\n\\n\`\`\`\\n' + msg.code + '\\n\`\`\`');
-          isStreaming = false;
-          sendBtn.disabled = false;
+          addMessage('assistant', msg.explanation + '\\n\\n' + String.fromCharCode(96,96,96) + '\\n' + msg.code + '\\n' + String.fromCharCode(96,96,96));
+          setStreamingState(false);
           break;
 
         case 'explanation':
           addMessage('assistant', msg.text);
-          isStreaming = false;
-          sendBtn.disabled = false;
+          setStreamingState(false);
           break;
 
         case 'historyCleared':

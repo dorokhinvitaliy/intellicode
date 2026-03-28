@@ -57,11 +57,17 @@ export class VectorStore {
     this.isDirty = true;
   }
 
-  async search(queryEmbedding: number[], topK: number = 10): Promise<SearchResult[]> {
+  async search(
+    queryEmbedding: number[],
+    topK: number = 10,
+    filterPath?: string
+  ): Promise<SearchResult[]> {
     const results: SearchResult[] = [];
 
     for (const chunk of this.chunks.values()) {
       if (!chunk.embedding) continue;
+      if (filterPath && !chunk.filePath.startsWith(filterPath)) continue;
+
       const score = this.cosineSimilarity(queryEmbedding, chunk.embedding);
       results.push({ chunk, score });
     }
@@ -73,7 +79,8 @@ export class VectorStore {
   async hybridSearch(
     queryEmbedding: number[],
     queryText: string,
-    topK: number = 10
+    topK: number = 10,
+    filterPath?: string
   ): Promise<SearchResult[]> {
     const results: SearchResult[] = [];
     const lowerQuery = queryText.toLowerCase();
@@ -85,6 +92,7 @@ export class VectorStore {
 
     for (const chunk of this.chunks.values()) {
       if (!chunk.embedding) continue;
+      if (filterPath && !chunk.filePath.startsWith(filterPath)) continue;
 
       const lowerPath = chunk.filePath.toLowerCase();
 

@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import * as crypto from 'crypto';
 import { SidebarChatProvider } from './providers/SidebarChatProvider';
 import { RAGStatusProvider } from './providers/RAGStatusProvider';
 import { ProjectIndexer } from './indexing/ProjectIndexer';
@@ -32,7 +33,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   let workspaceId = 'default';
   if (vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0) {
     const rootPath = vscode.workspace.workspaceFolders[0].uri.fsPath;
-    workspaceId = Buffer.from(rootPath).toString('base64').replace(/[^a-zA-Z0-9]/g, '').substring(0, 16);
+    workspaceId = crypto.createHash('sha256').update(rootPath).digest('hex').substring(0, 16);
   }
 
   // ─── Инициализация векторного хранилища и индексатора ───

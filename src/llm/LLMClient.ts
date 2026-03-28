@@ -87,6 +87,7 @@ export class LLMClient {
   async chat(messages: ChatMessage[], options?: {
     temperature?: number;
     maxTokens?: number;
+    signal?: AbortSignal;
   }): Promise<string> {
     if (!this.isReady()) {
       vscode.window.showErrorMessage(
@@ -106,6 +107,7 @@ export class LLMClient {
   async *chatStream(messages: ChatMessage[], options?: {
     temperature?: number;
     maxTokens?: number;
+    signal?: AbortSignal;
   }): AsyncGenerator<string> {
     if (!this.isReady()) {
       throw new Error('LLM не настроен');
@@ -134,6 +136,7 @@ export class LLMClient {
       method: 'POST',
       headers,
       body: JSON.stringify(body),
+      signal: options?.signal,
     });
 
     if (!response.ok) {
@@ -218,6 +221,7 @@ export class LLMClient {
   private async chatOpenAICompatible(messages: ChatMessage[], options?: {
     temperature?: number;
     maxTokens?: number;
+    signal?: AbortSignal;
   }): Promise<string> {
     const baseURL = this.getBaseURL();
     const apiKey = this.getApiKey();
@@ -239,6 +243,7 @@ export class LLMClient {
         temperature: options?.temperature ?? 0.3,
         max_tokens: options?.maxTokens ?? 4096,
       }),
+      signal: options?.signal,
     });
 
     if (!response.ok) {
@@ -255,6 +260,7 @@ export class LLMClient {
   private async chatAnthropic(messages: ChatMessage[], options?: {
     temperature?: number;
     maxTokens?: number;
+    signal?: AbortSignal;
   }): Promise<string> {
     const apiKey = this.getApiKey();
     const model = this.getDefaultModel();
@@ -277,6 +283,7 @@ export class LLMClient {
         system: systemMessage?.content || '',
         messages: chatMessages,
       }),
+      signal: options?.signal,
     });
 
     if (!response.ok) {

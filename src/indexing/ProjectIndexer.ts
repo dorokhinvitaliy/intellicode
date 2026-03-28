@@ -149,6 +149,23 @@ export class ProjectIndexer {
     }
 
     await this.vectorStore.addChunks(allChunks);
+    
+    // ─── Очистка устаревших чанков (Stale Cleanup) ──────────────────
+    progress?.report({ message: 'Очистка устаревших данных...' });
+    const allStoreChunks = this.vectorStore.getAllChunks();
+    const storedFiles = new Set(allStoreChunks.map(c => c.filePath));
+    const indexedFilesSet = new Set(files);
+
+    for (const storedFile of storedFiles) {
+      // If file is in store but was NOT found during current scan
+      if (!indexedFilesSet.has(storedFile)) {
+        // Double check: is it even within our root?
+        if (storedFile.startsWith(rootPath)) {
+          await this.vectorStore.removeByFile(storedFile);
+        }
+      }
+    }
+
     await this.vectorStore.saveToDisk();
 
     this.stats.totalChunks = this.vectorStore.getAllChunks().length;

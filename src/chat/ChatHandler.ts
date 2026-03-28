@@ -1,3 +1,5 @@
+import * as vscode from 'vscode';
+import * as fs from 'fs';
 import { LLMClient, ChatMessage } from '../llm/LLMClient';
 import { VectorStore, SearchResult } from '../indexing/VectorStore';
 import { AgentOrchestrator } from '../agents/AgentOrchestrator';
@@ -13,6 +15,10 @@ export class ChatHandler {
   private vectorStore: VectorStore;
   private orchestrator: AgentOrchestrator;
   private conversationHistory: ChatMessage[] = [];
+
+  private getWorkspaceRoot(): string | undefined {
+    return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  }
 
   // Max chars per context fragment
   private static MAX_FRAGMENT_CHARS = 500;
@@ -288,7 +294,7 @@ Well, I have found certain command, then I should run the command inside of the 
     // Search with expanded queries and merge by max score
     for (const q of expandedQueries) {
       const qEmbedding = await this.llmClient.createEmbedding(q);
-      const res = await this.vectorStore.hybridSearch(qEmbedding.embedding, q, topK);
+      const res = await this.vectorStore.hybridSearch(qEmbedding.embedding, q, topK, this.getWorkspaceRoot());
 
       for (const r of res) {
         const existing = allResultsMap.get(r.chunk.id);
@@ -372,7 +378,8 @@ Well, I have found certain command, then I should run the command inside of the 
     userMessage: string,
     topK: number = 15,
     retrievalQuery?: string,
-    isFeedback: boolean = false
+    isFeedback: boolean = false,
+    signal?: AbortSignal
   ): AsyncGenerator<{
     type: 'context' | 'token' | 'done';
     data: string;
@@ -388,7 +395,7 @@ Well, I have found certain command, then I should run the command inside of the 
     // Search with expanded queries and merge by max score
     for (const q of expandedQueries) {
       const qEmbedding = await this.llmClient.createEmbedding(q);
-      const res = await this.vectorStore.hybridSearch(qEmbedding.embedding, q, topK);
+      const res = await this.vectorStore.hybridSearch(qEmbedding.embedding, q, topK, this.getWorkspaceRoot());
 
       for (const r of res) {
         const existing = allResultsMap.get(r.chunk.id);
@@ -423,7 +430,7 @@ Well, I have found certain command, then I should run the command inside of the 
     ];
 
     let fullResponse = '';
-    for await (const token of this.llmClient.chatStream(messages)) {
+    for await (const token of this.llmClient.chatStream(messages, { signal })) {
       fullResponse += token;
       yield { type: 'token', data: token };
     }
@@ -447,7 +454,8 @@ Well, I have found certain command, then I should run the command inside of the 
     const searchResults = await this.vectorStore.hybridSearch(
       queryEmbedding.embedding,
       instruction,
-      8
+      8,
+      this.getWorkspaceRoot()
     );
 
     const context = this.buildContext(searchResults);
@@ -486,7 +494,7 @@ Well, I have found certain command, then I should run the command inside of the 
     filePath: string
   ): Promise<string> {
     const queryEmbedding = await this.llmClient.createEmbedding(code.substring(0, 500));
-    const searchResults = await this.vectorStore.search(queryEmbedding.embedding, 5);
+    const searchResults = await this.vectorStore.search(queryEmbedding.embedding, 5, this.getWorkspaceRoot());
     const context = this.buildContext(searchResults);
 
     const messages: ChatMessage[] = [
@@ -569,6 +577,10 @@ Well, I have found certain command, then I should run the command inside of the 
   private filterResults(results: SearchResult[]): SearchResult[] {
     return results.filter(r => {
       const fp = r.chunk.filePath.toLowerCase();
+      // Ensure file exists on disk
+      if (!fs.existsSync(r.chunk.filePath)) {
+        return false;
+      }
       return !fp.includes('node_modules') &&
         !fp.includes('.git/') &&
         !fp.includes('dist/') &&
