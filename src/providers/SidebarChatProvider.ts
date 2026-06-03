@@ -102,6 +102,17 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
             .getConfiguration('intellicodeFabric')
             .update('enableThinking', message.enabled, vscode.ConfigurationTarget.Global);
           break;
+        case 'openFile': {
+          const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+          const abs = path.isAbsolute(message.path) ? message.path : path.join(root, message.path);
+          try {
+            const doc = await vscode.workspace.openTextDocument(abs);
+            await vscode.window.showTextDocument(doc);
+          } catch {
+            vscode.window.showWarningMessage(`Не удалось открыть файл: ${message.path}`);
+          }
+          break;
+        }
       }
     });
   }
@@ -442,6 +453,7 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
 
     const rootPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
     let opCount = 0;
+    const affected: { path: string; kind: string }[] = [];
 
     try {
       const { context } = await this.chatHandler.buildAgentContext(task);
@@ -460,8 +472,8 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
 
         this.trimAgentMessages(messages);
 
-        // Open a fresh assistant bubble for this step
-        this.postMessageToWebview({ type: 'context', message: `Шаг ${step + 1}`, files: [] });
+        // Begin a fresh assistant turn (bubble is created lazily on first token)
+        this.postMessageToWebview({ type: 'agentTurn' });
 
         let full = '';
         for await (const tok of this.chatHandler.streamMessages(messages, signal)) {
@@ -479,11 +491,13 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
 
         // LIST_DIR — file discovery
         for (const dir of this.parseListDirOps(actionable)) {
+          this.postMessageToWebview({ type: 'agentAction', action: { kind: 'list', target: dir, success: true } });
           observations.push(`LIST_DIR ${dir}:\n${this.listDirForAgent(dir, rootPath)}`);
         }
 
         // READ_FILE
         for (const p of this.parseReadFileOps(actionable)) {
+          this.postMessageToWebview({ type: 'agentAction', action: { kind: 'read', target: p, success: true } });
           observations.push(this.readFileForAgent(p, rootPath));
         }
 
@@ -497,9 +511,13 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
           opCount++;
 
           const res = await this.fileOps.executeAgentOperation(op);
-          this.postMessageToWebview({ type: 'operationResult', result: res });
-
           const target = op.filePath || op.command || '';
+
+          this.postMessageToWebview({
+            type: 'agentAction',
+            action: { kind: op.type, target, success: res.success },
+          });
+
           let line = `${op.type.toUpperCase()} ${target} → ${res.success ? 'OK' : 'FAILED: ' + res.message}`;
           if (res.output) {
             line += `\nOutput:\n${res.output.slice(0, 1500)}`;
@@ -514,6 +532,9 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
           }
           observations.push(line);
 
+          if (res.success && op.filePath && (op.type === 'create' || op.type === 'edit' || op.type === 'delete')) {
+            affected.push({ path: op.filePath, kind: op.type });
+          }
           // Re-index created/edited files so later steps see them
           if (res.success && op.filePath && op.type !== 'delete') {
             await this.indexer.indexFile(path.join(rootPath, op.filePath)).catch(() => { });
@@ -535,6 +556,11 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
         this.postMessageToWebview({ type: 'error', message: errMsg });
       }
     } finally {
+      if (affected.length > 0) {
+        const seen = new Set<string>();
+        const uniq = affected.filter(a => (seen.has(a.path) ? false : (seen.add(a.path), true)));
+        this.postMessageToWebview({ type: 'affectedFiles', files: uniq });
+      }
       this.postMessageToWebview({ type: 'thinking', show: false });
       this.postMessageToWebview({ type: 'done' });
     }
@@ -1284,6 +1310,57 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
       border-color: var(--ic-border);
     }
     .welcome-btn svg { color: var(--ic-fg-mute); }
+
+    /* ─── Agent action rows ─── */
+    .agent-action {
+      display: flex; align-items: center; gap: 9px;
+      padding: 7px 12px; margin: 4px 0;
+      border-radius: var(--ic-radius-sm);
+      border: 1px solid var(--ic-hairline);
+      background: var(--ic-surface);
+      animation: slideIn 0.2s ease;
+    }
+    .agent-action svg { width: 14px; height: 14px; flex-shrink: 0; color: var(--ic-fg-mute); }
+    .agent-action.fail svg { color: var(--error); }
+    .aa-verb { color: var(--ic-fg-mute); font-weight: 500; font-size: 12px; white-space: nowrap; }
+    .aa-target {
+      font-family: var(--vscode-editor-font-family); font-size: 11.5px;
+      color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .agent-action.fail .aa-target { color: var(--error); }
+
+    /* ─── Affected files widget ─── */
+    .affected {
+      margin: 12px 0; border-radius: var(--ic-radius);
+      border: 1px solid var(--ic-hairline); background: var(--ic-surface);
+      overflow: hidden; animation: slideIn 0.25s ease;
+    }
+    .affected-head {
+      display: flex; align-items: center; gap: 8px;
+      padding: 10px 13px; cursor: pointer; user-select: none;
+      font-size: 11px; font-weight: 600; letter-spacing: 0.5px;
+      text-transform: uppercase; color: var(--ic-fg-mute);
+    }
+    .affected-head svg { width: 14px; height: 14px; flex-shrink: 0; }
+    .affected-head .chev { margin-left: 4px; transition: transform 0.2s; font-size: 10px; }
+    .affected-count {
+      margin-left: auto; font-family: var(--vscode-editor-font-family);
+      color: var(--fg-dim); font-weight: 500; letter-spacing: 0; text-transform: none;
+    }
+    .affected-list { border-top: 1px solid var(--ic-hairline); }
+    .affected-item {
+      display: flex; align-items: center; gap: 9px;
+      padding: 8px 13px; cursor: pointer;
+      border-bottom: 1px solid var(--ic-border-soft);
+    }
+    .affected-item:last-child { border-bottom: none; }
+    .affected-item:hover { background: var(--ic-surface-2); }
+    .affected-item svg { width: 13px; height: 13px; color: var(--ic-fg-mute); flex-shrink: 0; }
+    .affected-item .ai-verb { color: var(--ic-fg-mute); font-size: 11px; white-space: nowrap; }
+    .affected-item .ai-path {
+      font-family: var(--vscode-editor-font-family); font-size: 11.5px;
+      color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
   </style>
 </head>
 <body>
@@ -1550,6 +1627,89 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
     var SVG_AI = '<svg class="msg-icon msg-icon-ai" viewBox="0 0 24 24" fill="none" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>';
     var SVG_SEARCH = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>';
 
+    // ─── Agent action icons & labels ────────────────────
+    function svgWrap(inner) {
+      return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">' + inner + '</svg>';
+    }
+    var ICON_FILE = svgWrap('<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/>');
+    var ICON_FOLDER = svgWrap('<path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>');
+    var ICON_FILE_PLUS = svgWrap('<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="18" x2="12" y2="12"/><line x1="9" y1="15" x2="15" y2="15"/>');
+    var ICON_PENCIL = svgWrap('<path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>');
+    var ICON_TRASH = svgWrap('<polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/>');
+    var ICON_TERMINAL = svgWrap('<polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/>');
+
+    function actionMeta(kind) {
+      switch (kind) {
+        case 'read':    return { verb: 'Read file',    icon: ICON_FILE };
+        case 'list':    return { verb: 'Read folder',  icon: ICON_FOLDER };
+        case 'create':  return { verb: 'Created file', icon: ICON_FILE_PLUS };
+        case 'edit':    return { verb: 'Edited file',  icon: ICON_PENCIL };
+        case 'delete':  return { verb: 'Deleted file', icon: ICON_TRASH };
+        case 'execute': return { verb: 'Ran',          icon: ICON_TERMINAL };
+        default:        return { verb: kind,           icon: ICON_FILE };
+      }
+    }
+
+    function shortPath(p) {
+      // Show last two segments for readability (dir/file)
+      var parts = String(p).split('/');
+      if (parts.length <= 2) return p;
+      return '…/' + parts.slice(-2).join('/');
+    }
+
+    function appendAgentAction(a) {
+      if (welcomeEl) welcomeEl.style.display = 'none';
+      var meta = actionMeta(a.kind);
+      var div = document.createElement('div');
+      div.className = 'agent-action' + (a.success ? '' : ' fail');
+      var target = a.kind === 'execute' ? (a.target || '') : shortPath(a.target || '');
+      div.innerHTML = meta.icon +
+        '<span class="aa-verb">' + meta.verb + '</span>' +
+        '<span class="aa-target">' + escapeHtml(target) + '</span>';
+      messagesEl.appendChild(div);
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+
+    function renderAffectedFiles(files) {
+      if (!files || !files.length) return;
+      var wrap = document.createElement('div');
+      wrap.className = 'affected';
+
+      var head = document.createElement('div');
+      head.className = 'affected-head';
+      head.innerHTML = SVG_AI.replace('msg-icon msg-icon-ai', '') +
+        '<span>Affected files</span>' +
+        '<span class="affected-count">' + files.length + '</span>' +
+        '<span class="chev">▼</span>';
+
+      var list = document.createElement('div');
+      list.className = 'affected-list';
+      files.forEach(function (f) {
+        var meta = actionMeta(f.kind);
+        var item = document.createElement('div');
+        item.className = 'affected-item';
+        item.innerHTML = meta.icon +
+          '<span class="ai-path">' + escapeHtml(f.path) + '</span>' +
+          '<span class="ai-verb" style="margin-left:auto">' + meta.verb + '</span>';
+        item.addEventListener('click', function () {
+          vscode.postMessage({ type: 'openFile', path: f.path });
+        });
+        list.appendChild(item);
+      });
+
+      var chev = head.querySelector('.chev');
+      head.addEventListener('click', function () {
+        var hidden = list.style.display === 'none';
+        list.style.display = hidden ? 'block' : 'none';
+        if (chev) chev.style.transform = hidden ? '' : 'rotate(-90deg)';
+      });
+
+      wrap.appendChild(head);
+      wrap.appendChild(list);
+      messagesEl.appendChild(wrap);
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+
     // ─── Messages ────────────────────────────
 
     function sendMessage() {
@@ -1764,14 +1924,30 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
           break;
         }
 
+        case 'agentTurn':
+          // Begin a new agent turn; bubble appears lazily on first token
+          currentAssistantEl = null;
+          currentAssistantText = '';
+          break;
+
+        case 'agentAction':
+          appendAgentAction(msg.action);
+          break;
+
+        case 'affectedFiles':
+          renderAffectedFiles(msg.files);
+          break;
+
         case 'token':
           // Generation started — drop the "analyzing request" spinner
           thinkingEl.style.display = 'none';
-          currentAssistantText += msg.text;
-          if (currentAssistantEl) {
-            var contentEl = currentAssistantEl.querySelector('.msg-content');
-            contentEl.innerHTML = renderMarkdown(currentAssistantText);
+          if (!currentAssistantEl) {
+            currentAssistantText = '';
+            currentAssistantEl = addMessage('assistant', '');
           }
+          currentAssistantText += msg.text;
+          var contentEl = currentAssistantEl.querySelector('.msg-content');
+          contentEl.innerHTML = renderMarkdown(currentAssistantText);
           messagesEl.scrollTop = messagesEl.scrollHeight;
           break;
 
