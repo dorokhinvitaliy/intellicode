@@ -283,6 +283,57 @@ Well, I have found certain command, then I should run the command inside of the 
     return this.orchestrator;
   }
 
+  // ─── Agent mode ──────────────────────────────────────────
+
+  private static AGENT_ADDENDUM = `
+━━━━━━━━━━━━━━━━━━━━━━━━
+AGENT MODE (AUTONOMOUS)
+━━━━━━━━━━━━━━━━━━━━━━━━
+
+You run in a LOOP until the whole task is finished. Each turn: think, then emit
+one or more tool markers. After they execute you receive an [OBSERVATIONS] block
+with the results, then you continue with the next turn.
+
+Operations run AUTOMATICALLY — never ask the user to confirm or to do things manually.
+
+Extra tools available in agent mode:
+
+LIST FILES in a directory (recursive):
+<<<LIST_DIR path="relative/dir"/>>>
+
+SIGNAL COMPLETION (only when the ENTIRE task is done):
+<<<DONE>>>
+followed by a short summary of what was done.
+
+Agent rules:
+1. For tasks over "all" / "every" files (e.g. "cover all UI components with tests"),
+   FIRST use LIST_DIR to discover the files, THEN process each one.
+2. You may emit MANY markers in a single turn (e.g. create several test files at once).
+3. ALWAYS READ a file before you EDIT it.
+4. After writing code/tests you MAY run the relevant command (test runner, build)
+   via EXECUTE to verify the result, then fix failures.
+5. Do NOT output <<<DONE>>> until every required file and action is complete.
+6. Keep each turn focused; rely on the [OBSERVATIONS] you receive to decide the next step.
+`;
+
+  getAgentSystemPrompt(): string {
+    return ChatHandler.SYSTEM_PROMPT + ChatHandler.AGENT_ADDENDUM;
+  }
+
+  /** Build RAG context for an agent task (retrieval + size-bounded context string). */
+  async buildAgentContext(task: string): Promise<{ context: string; relevantFiles: string[] }> {
+    const results = await this.retrieve(task, 15);
+    return {
+      context: this.buildContext(results),
+      relevantFiles: [...new Set(results.map(r => r.chunk.filePath))],
+    };
+  }
+
+  /** Stream a raw message list (used by the agent loop, bypasses history). */
+  async *streamMessages(messages: ChatMessage[], signal?: AbortSignal): AsyncGenerator<string> {
+    yield* this.llmClient.chatStream(messages, { signal });
+  }
+
   async handleMessage(userMessage: string, topK: number = 10): Promise<{
     response: string;
     relevantFiles: string[];

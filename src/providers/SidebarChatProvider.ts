@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import { ChatHandler } from '../chat/ChatHandler';
+import { ChatMessage } from '../llm/LLMClient';
 import { ProjectIndexer } from '../indexing/ProjectIndexer';
 import { FileOperationsHandler, FileOperation } from '../operations/FileOperationsHandler';
 
@@ -51,8 +52,12 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
           this.feedbackDepth = 0;
           this.lastUserQuery = message.text;
           // Try smart command routing first (bypasses LLM for simple commands)
-          if (!await this.trySmartRoute(message.text)) {
+          if (await this.trySmartRoute(message.text)) { break; }
+          // Questions get a one-shot answer; commands run the autonomous agent loop
+          if (this.isQuestionMessage(message.text)) {
             await this.handleChatMessage(message.text);
+          } else {
+            await this.runAgent(message.text);
           }
           break;
         case 'indexProject':
@@ -415,6 +420,207 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
       this.feedbackDepth++;
       const feedback = `Here are the requested file contents:\n\n${fileContents.join('\n\n')}\n\nNow complete the original task using this information.`;
       await this.handleChatMessage(feedback, true);
+    }
+  }
+
+  // ─── Autonomous agent loop ────────────────────────────────
+
+  private static AGENT_MAX_STEPS = 20;
+  private static AGENT_MAX_OPS = 80;
+
+  /**
+   * Runs a task as an autonomous agent: streams a step, executes every action
+   * (file ops + commands) automatically, feeds the results back, and repeats
+   * until the model emits <<<DONE>>> or a safety limit is hit.
+   */
+  private async runAgent(task: string): Promise<void> {
+    this.postMessageToWebview({ type: 'thinking', show: true });
+
+    this.abortController?.abort();
+    this.abortController = new AbortController();
+    const signal = this.abortController.signal;
+
+    const rootPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+    let opCount = 0;
+
+    try {
+      const { context } = await this.chatHandler.buildAgentContext(task);
+      const configContext = this.getProjectConfigContext();
+
+      const messages: ChatMessage[] = [
+        { role: 'system', content: this.chatHandler.getAgentSystemPrompt() },
+        {
+          role: 'user',
+          content: `TASK: ${task}${configContext}\n\nPROJECT CONTEXT:\n${context}`,
+        },
+      ];
+
+      for (let step = 0; step < SidebarChatProvider.AGENT_MAX_STEPS; step++) {
+        if (signal.aborted) { break; }
+
+        this.trimAgentMessages(messages);
+
+        // Open a fresh assistant bubble for this step
+        this.postMessageToWebview({ type: 'context', message: `Шаг ${step + 1}`, files: [] });
+
+        let full = '';
+        for await (const tok of this.chatHandler.streamMessages(messages, signal)) {
+          if (signal.aborted) { break; }
+          full += tok;
+          this.postMessageToWebview({ type: 'token', text: tok });
+        }
+        if (signal.aborted) { break; }
+        messages.push({ role: 'assistant', content: full });
+
+        const actionable = this.stripReasoning(full);
+        const done = /<<<\s*DONE\s*>>>/i.test(actionable);
+
+        const observations: string[] = [];
+
+        // LIST_DIR — file discovery
+        for (const dir of this.parseListDirOps(actionable)) {
+          observations.push(`LIST_DIR ${dir}:\n${this.listDirForAgent(dir, rootPath)}`);
+        }
+
+        // READ_FILE
+        for (const p of this.parseReadFileOps(actionable)) {
+          observations.push(this.readFileForAgent(p, rootPath));
+        }
+
+        // CREATE / EDIT / DELETE / EXECUTE — strict (no code-block fallback)
+        const ops = this.fileOps.parseOperationsFromResponse(actionable, true);
+        for (const op of ops) {
+          if (opCount >= SidebarChatProvider.AGENT_MAX_OPS) {
+            observations.push('⚠ Достигнут лимит операций — остановитесь и подведите итог.');
+            break;
+          }
+          opCount++;
+
+          const res = await this.fileOps.executeAgentOperation(op);
+          this.postMessageToWebview({ type: 'operationResult', result: res });
+
+          const target = op.filePath || op.command || '';
+          let line = `${op.type.toUpperCase()} ${target} → ${res.success ? 'OK' : 'FAILED: ' + res.message}`;
+          if (res.output) {
+            line += `\nOutput:\n${res.output.slice(0, 1500)}`;
+            if (op.type === 'execute') {
+              this.postMessageToWebview({
+                type: 'commandOutput',
+                output: res.output.slice(0, 2000),
+                command: op.command || '',
+                success: res.success,
+              });
+            }
+          }
+          observations.push(line);
+
+          // Re-index created/edited files so later steps see them
+          if (res.success && op.filePath && op.type !== 'delete') {
+            await this.indexer.indexFile(path.join(rootPath, op.filePath)).catch(() => { });
+          }
+        }
+
+        // Stop after executing this turn's actions if the model signalled completion,
+        // or if it produced no actions at all (final prose answer)
+        if (done || observations.length === 0) { break; }
+
+        messages.push({
+          role: 'user',
+          content: `[OBSERVATIONS]\n${observations.join('\n\n')}\n\nContinue. Perform the next action, or output <<<DONE>>> with a brief summary when the task is fully complete.`,
+        });
+      }
+    } catch (error: any) {
+      if (error?.name !== 'AbortError') {
+        const errMsg = error instanceof Error ? error.message : String(error);
+        this.postMessageToWebview({ type: 'error', message: errMsg });
+      }
+    } finally {
+      this.postMessageToWebview({ type: 'thinking', show: false });
+      this.postMessageToWebview({ type: 'done' });
+    }
+  }
+
+  /** Keep the agent transcript bounded: system + task + most recent turns. */
+  private trimAgentMessages(messages: ChatMessage[]): void {
+    const MAX = 14;
+    if (messages.length <= MAX) { return; }
+    const head = messages.slice(0, 2);
+    const tail = messages.slice(-(MAX - 2));
+    messages.length = 0;
+    messages.push(...head, ...tail);
+  }
+
+  /** Parse <<<LIST_DIR path="..."/>>> markers. */
+  private parseListDirOps(response: string): string[] {
+    const dirs: string[] = [];
+    const regex = /<<<\s*LIST_DIR\s+path="([^"]+)"\s*\/?>+/gi;
+    let match;
+    while ((match = regex.exec(response)) !== null) {
+      dirs.push(match[1]);
+    }
+    return dirs;
+  }
+
+  /** Recursively list source files under a directory for the agent. */
+  private listDirForAgent(relDir: string, rootPath: string): string {
+    const ignoreDirs = new Set([
+      'node_modules', '.git', 'dist', 'build', 'out', '.next',
+      'coverage', '.venv', 'venv', '__pycache__', 'target', 'vendor',
+    ]);
+    const cleaned = relDir.replace(/^[./\\]+/, '');
+    const base = path.join(rootPath, cleaned);
+    const found: string[] = [];
+    const MAX = 200;
+
+    const walk = (dir: string, depth: number): void => {
+      if (depth > 8 || found.length >= MAX) { return; }
+      let entries: fs.Dirent[];
+      try {
+        entries = fs.readdirSync(dir, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const e of entries) {
+        if (found.length >= MAX) { return; }
+        if (e.isDirectory()) {
+          if (ignoreDirs.has(e.name) || e.name.startsWith('.')) { continue; }
+          walk(path.join(dir, e.name), depth + 1);
+        } else if (e.isFile()) {
+          found.push(path.relative(rootPath, path.join(dir, e.name)).replace(/\\/g, '/'));
+        }
+      }
+    };
+
+    if (!fs.existsSync(base)) {
+      return `(directory not found: ${relDir})`;
+    }
+    walk(base, 0);
+    if (found.length === 0) { return '(no files found)'; }
+    const suffix = found.length >= MAX ? `\n... (truncated at ${MAX})` : '';
+    return found.join('\n') + suffix;
+  }
+
+  /** Read a single file for the agent, normalizing the path and bounding size. */
+  private readFileForAgent(filePath: string, rootPath: string): string {
+    let normalizedPath = filePath.replace(/\\/g, '/');
+    const normalizedRoot = rootPath.replace(/\\/g, '/');
+    if (normalizedPath.startsWith(normalizedRoot)) {
+      normalizedPath = normalizedPath.substring(normalizedRoot.length);
+    }
+    const rel = normalizedPath.replace(/^[/\\]+/, '');
+    const fullPath = path.join(rootPath, rel);
+
+    try {
+      if (!fs.existsSync(fullPath)) {
+        return `READ_FILE ${rel} → NOT FOUND`;
+      }
+      let content = fs.readFileSync(fullPath, 'utf-8');
+      if (content.length > 6000) {
+        content = content.slice(0, 6000) + '\n... (truncated)';
+      }
+      return `READ_FILE ${rel}:\n${content}`;
+    } catch {
+      return `READ_FILE ${rel} → READ ERROR`;
     }
   }
 
@@ -1006,6 +1212,10 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
       text = text.replace(new RegExp(L + '{1,}' + S + '*EXECUTE' + S + '+command="[^"]*"' + S + '*' + SL + '?' + S + '*' + R + '{1,}', 'gi'), '');
       // READ_FILE
       text = text.replace(new RegExp(L + '{1,}' + S + '*READ_FILE' + S + '+path="[^"]*"' + S + '*' + SL + '?' + S + '*' + R + '{1,}', 'gi'), '');
+      // LIST_DIR
+      text = text.replace(new RegExp(L + '{1,}' + S + '*LIST_DIR' + S + '+path="[^"]*"' + S + '*' + SL + '?' + S + '*' + R + '{1,}', 'gi'), '');
+      // DONE
+      text = text.replace(new RegExp(L + '{1,}' + S + '*DONE' + S + '*' + SL + '?' + S + '*' + R + '{1,}', 'gi'), '');
       // END_FILE orphans
       text = text.replace(new RegExp(L + '{1,}' + S + '*(?:END_FILE|/(?:CREATE|EDIT)_FILE)' + S + '*' + R + '{1,}', 'gi'), '');
       // XML-style closing: </CREATE_FILE>
