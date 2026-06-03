@@ -141,16 +141,20 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
             this.postMessageToWebview({ type: 'token', text: chunk.data });
             break;
           case 'done': {
+            // Strip model reasoning (<think>/<thinking>) so markers the model
+            // merely contemplated aren't executed. qwen3 uses <think>.
+            const actionable = this.stripReasoning(chunk.data);
+
             // Handle READ_FILE operations for ALL types of requests
             // (Even for questions, the AI might need to read a file to answer)
-            const readFileOps = this.parseReadFileOps(chunk.data);
+            const readFileOps = this.parseReadFileOps(actionable);
             if (readFileOps.length > 0) {
               await this.handleReadFiles(readFileOps);
             }
 
             // Only parse other command markers (CREATE/EDIT/EXECUTE) for command-type messages, not questions
             if (!isQuestion) {
-              const ops = this.fileOps.parseOperationsFromResponse(chunk.data);
+              const ops = this.fileOps.parseOperationsFromResponse(actionable);
 
               const actionOps = ops.filter(op => !(op.type === 'execute' && op.command?.startsWith('READ_FILE:')));
               if (actionOps.length > 0) {
@@ -178,6 +182,19 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
     }
 
     this.postMessageToWebview({ type: 'thinking', show: false });
+  }
+
+  /**
+   * Remove model reasoning blocks (<think>...</think>, <thinking>...</thinking>)
+   * before parsing executable markers. Reasoning may contain example markers the
+   * model never intended to run. Unclosed blocks (interrupted stream) are dropped too.
+   */
+  private stripReasoning(text: string): string {
+    return text
+      .replace(/<think>[\s\S]*?<\/think>/gi, '')
+      .replace(/<thinking>[\s\S]*?<\/thinking>/gi, '')
+      .replace(/<think(?:ing)?>[\s\S]*$/i, '')
+      .trim();
   }
 
   /**
@@ -975,12 +992,19 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
       // Handle <thinking> blocks using indexOf (no regex escaping issues)
       var L = String.fromCharCode(60);
       var R = String.fromCharCode(62);
-      var thinkOpen = L + 'thinking' + R;
-      var thinkClose = L + '/thinking' + R;
+      // Support both <thinking> (system-prompt convention) and <think> (qwen3 native)
+      var lowerText = text.toLowerCase();
+      var thinkTag = 'thinking';
+      var tStart = lowerText.indexOf(L + 'thinking' + R);
+      if (tStart === -1) {
+        var tStartShort = lowerText.indexOf(L + 'think' + R);
+        if (tStartShort !== -1) { thinkTag = 'think'; tStart = tStartShort; }
+      }
+      var thinkOpen = L + thinkTag + R;
+      var thinkClose = L + '/' + thinkTag + R;
       var thinkingHtml = '';
       var visibleText = text;
 
-      var tStart = text.toLowerCase().indexOf(thinkOpen.toLowerCase());
       if (tStart !== -1) {
         var tEnd = text.toLowerCase().indexOf(thinkClose.toLowerCase(), tStart);
         if (tEnd !== -1) {

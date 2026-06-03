@@ -553,6 +553,7 @@ Well, I have found certain command, then I should run the command inside of the 
     const cleanResponse = aiResponse
       .replace(/<<<[\s\S]*?>>>/g, '')
       .replace(/<thinking[\s\S]*?<\/thinking>/gi, '')
+      .replace(/<think>[\s\S]*?<\/think>/gi, '')
       .trim();
 
     // Truncate to keep history slim
