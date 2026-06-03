@@ -46,20 +46,26 @@ export class LLMClient {
     return !!this.config.apiKey;
   }
 
-  /** Возвращает base URL для текущего провайдера */
+  /** Возвращает base URL для текущего провайдера (без хвостового слэша) */
   private getBaseURL(): string {
+    let url: string;
     switch (this.config.provider) {
       case 'ollama':
-        return this.config.endpoint || 'http://localhost:11434/v1';
+        url = this.config.endpoint || 'http://localhost:11434/v1';
+        break;
       case 'openai':
-        return this.config.endpoint || 'https://api.openai.com/v1';
+        url = this.config.endpoint || 'https://api.openai.com/v1';
+        break;
       case 'anthropic':
-        return this.config.endpoint || 'https://api.anthropic.com';
+        url = this.config.endpoint || 'https://api.anthropic.com';
+        break;
       case 'custom':
-        return this.config.endpoint;
+        url = this.config.endpoint;
+        break;
       default:
-        return 'https://api.openai.com/v1';
+        url = 'https://api.openai.com/v1';
     }
+    return (url || '').replace(/\/+$/, '');
   }
 
   /** Возвращает API-ключ (для Ollama — пустая строка допустима) */
@@ -111,6 +117,14 @@ export class LLMClient {
   }): AsyncGenerator<string> {
     if (!this.isReady()) {
       throw new Error('LLM не настроен');
+    }
+
+    // Anthropic не поддерживает OpenAI-совместимый /chat/completions стрим —
+    // выполняем обычный запрос и отдаём ответ одним куском.
+    if (this.config.provider === 'anthropic') {
+      const full = await this.chatAnthropic(messages, options);
+      if (full) { yield full; }
+      return;
     }
 
     const baseURL = this.getBaseURL();
@@ -270,7 +284,7 @@ export class LLMClient {
       .filter(m => m.role !== 'system')
       .map(m => ({ role: m.role as 'user' | 'assistant', content: m.content }));
 
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
+    const response = await fetch(`${this.getBaseURL()}/v1/messages`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -322,8 +336,13 @@ export class LLMClient {
     }
 
     const data = await response.json() as any;
+    const embedding = data.data[0].embedding;
+    if (embedding?.length > 0) {
+      // Запоминаем размерность сервера, чтобы локальный fallback ей соответствовал
+      this.embeddingDimension = embedding.length;
+    }
     return {
-      embedding: data.data[0].embedding,
+      embedding,
       tokensUsed: data.usage?.total_tokens || 0,
     };
   }
@@ -359,6 +378,9 @@ export class LLMClient {
 
       const data = await response.json() as any;
       for (const item of data.data) {
+        if (item.embedding?.length > 0) {
+          this.embeddingDimension = item.embedding.length;
+        }
         results.push({
           embedding: item.embedding,
           tokensUsed: Math.floor((data.usage?.total_tokens || 0) / batch.length),
