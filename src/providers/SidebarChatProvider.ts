@@ -453,6 +453,7 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
 
     const rootPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
     let opCount = 0;
+    let actionId = 0;
     const affected: { path: string; kind: string }[] = [];
 
     try {
@@ -491,13 +492,13 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
 
         // LIST_DIR — file discovery
         for (const dir of this.parseListDirOps(actionable)) {
-          this.postMessageToWebview({ type: 'agentAction', action: { kind: 'list', target: dir, success: true } });
+          this.postMessageToWebview({ type: 'agentAction', action: { id: ++actionId, kind: 'list', target: dir, status: 'success' } });
           observations.push(`LIST_DIR ${dir}:\n${this.listDirForAgent(dir, rootPath)}`);
         }
 
         // READ_FILE
         for (const p of this.parseReadFileOps(actionable)) {
-          this.postMessageToWebview({ type: 'agentAction', action: { kind: 'read', target: p, success: true } });
+          this.postMessageToWebview({ type: 'agentAction', action: { id: ++actionId, kind: 'read', target: p, status: 'success' } });
           observations.push(this.readFileForAgent(p, rootPath));
         }
 
@@ -510,13 +511,15 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
           }
           opCount++;
 
-          const res = await this.fileOps.executeAgentOperation(op);
           const target = op.filePath || op.command || '';
-
+          const aid = ++actionId;
           this.postMessageToWebview({
             type: 'agentAction',
-            action: { kind: op.type, target, success: res.success },
+            action: { id: aid, kind: op.type, target, status: 'running' },
           });
+
+          const res = await this.fileOps.executeAgentOperation(op);
+          this.postMessageToWebview({ type: 'agentActionDone', id: aid, success: res.success });
 
           let line = `${op.type.toUpperCase()} ${target} → ${res.success ? 'OK' : 'FAILED: ' + res.message}`;
           if (res.output) {
@@ -1311,17 +1314,44 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
     }
     .welcome-btn svg { color: var(--ic-fg-mute); }
 
-    /* ─── Agent action rows ─── */
+    /* ─── Agent tool group ─── */
+    .tool-group {
+      margin: 8px 0; border: 1px solid var(--ic-hairline);
+      border-radius: var(--ic-radius); background: var(--ic-surface);
+      overflow: hidden; animation: slideIn 0.2s ease;
+    }
+    .tool-group-head {
+      display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+      cursor: pointer; user-select: none;
+      font-size: 10.5px; font-weight: 600; letter-spacing: 0.5px;
+      text-transform: uppercase; color: var(--ic-fg-mute);
+    }
+    .tool-group-head svg { width: 13px; height: 13px; flex-shrink: 0; }
+    .tool-group-head .tg-count {
+      margin-left: auto; font-family: var(--vscode-editor-font-family);
+      letter-spacing: 0; text-transform: none; color: var(--fg-dim);
+    }
+    .tool-group-head .chev { transition: transform .2s; font-size: 9px; opacity: .7; }
+    .tool-group-body { border-top: 1px solid var(--ic-hairline); }
+
+    /* ─── Agent action row ─── */
     .agent-action {
       display: flex; align-items: center; gap: 9px;
-      padding: 7px 12px; margin: 4px 0;
-      border-radius: var(--ic-radius-sm);
-      border: 1px solid var(--ic-hairline);
-      background: var(--ic-surface);
-      animation: slideIn 0.2s ease;
+      padding: 7px 12px;
+      border-bottom: 1px solid var(--ic-border-soft);
+      animation: slideIn 0.16s ease;
     }
-    .agent-action svg { width: 14px; height: 14px; flex-shrink: 0; color: var(--ic-fg-mute); }
-    .agent-action.fail svg { color: var(--error); }
+    .agent-action:last-child { border-bottom: none; }
+    .aa-status {
+      width: 14px; height: 14px; flex-shrink: 0;
+      display: inline-flex; align-items: center; justify-content: center;
+    }
+    .aa-status svg { width: 14px; height: 14px; }
+    .aa-running { color: var(--ic-fg-mute); }
+    .aa-ok { color: var(--success); }
+    .aa-bad { color: var(--error); }
+    .aa-spin { animation: aaspin 0.8s linear infinite; transform-origin: center; }
+    @keyframes aaspin { to { transform: rotate(360deg); } }
     .aa-verb { color: var(--ic-fg-mute); font-weight: 500; font-size: 12px; white-space: nowrap; }
     .aa-target {
       font-family: var(--vscode-editor-font-family); font-size: 11.5px;
@@ -1650,24 +1680,74 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
       }
     }
 
+    var ICON_TOOLS = svgWrap('<polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>');
+    var ICON_CHECK = svgWrap('<polyline points="20 6 9 17 4 12"/>');
+    var ICON_X = svgWrap('<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>');
+    var ICON_SPINNER = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" class="aa-spin"><path d="M21 12a9 9 0 1 1-6.22-8.56"/></svg>';
+
     function shortPath(p) {
-      // Show last two segments for readability (dir/file)
       var parts = String(p).split('/');
       if (parts.length <= 2) return p;
       return '…/' + parts.slice(-2).join('/');
     }
 
-    function appendAgentAction(a) {
+    function statusGlyph(status) {
+      if (status === 'success') return '<span class="aa-ok">' + ICON_CHECK + '</span>';
+      if (status === 'fail') return '<span class="aa-bad">' + ICON_X + '</span>';
+      return '<span class="aa-running">' + ICON_SPINNER + '</span>';
+    }
+
+    var currentGroupEl = null;
+    function resetToolGroup() { currentGroupEl = null; }
+    function ensureToolGroup() {
+      if (currentGroupEl) return currentGroupEl;
       if (welcomeEl) welcomeEl.style.display = 'none';
+      var g = document.createElement('div');
+      g.className = 'tool-group';
+      var head = document.createElement('div');
+      head.className = 'tool-group-head';
+      head.innerHTML = ICON_TOOLS + '<span>Actions</span><span class="tg-count">0</span><span class="chev">▼</span>';
+      var body = document.createElement('div');
+      body.className = 'tool-group-body';
+      var chev = head.querySelector('.chev');
+      head.addEventListener('click', function () {
+        var hidden = body.style.display === 'none';
+        body.style.display = hidden ? 'block' : 'none';
+        if (chev) chev.style.transform = hidden ? '' : 'rotate(-90deg)';
+      });
+      g.appendChild(head);
+      g.appendChild(body);
+      g._body = body;
+      g._count = 0;
+      g._countEl = head.querySelector('.tg-count');
+      messagesEl.appendChild(g);
+      currentGroupEl = g;
+      return g;
+    }
+
+    function appendAgentAction(a) {
+      var g = ensureToolGroup();
       var meta = actionMeta(a.kind);
-      var div = document.createElement('div');
-      div.className = 'agent-action' + (a.success ? '' : ' fail');
+      var row = document.createElement('div');
+      row.className = 'agent-action' + (a.status === 'fail' ? ' fail' : '');
+      if (a.id != null) row.setAttribute('data-aid', String(a.id));
       var target = a.kind === 'execute' ? (a.target || '') : shortPath(a.target || '');
-      div.innerHTML = meta.icon +
+      row.innerHTML =
+        '<span class="aa-status">' + statusGlyph(a.status) + '</span>' +
         '<span class="aa-verb">' + meta.verb + '</span>' +
         '<span class="aa-target">' + escapeHtml(target) + '</span>';
-      messagesEl.appendChild(div);
+      g._body.appendChild(row);
+      g._count++;
+      if (g._countEl) g._countEl.textContent = g._count;
       messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+
+    function updateAgentAction(id, success) {
+      var row = messagesEl.querySelector('.agent-action[data-aid="' + id + '"]');
+      if (!row) return;
+      var st = row.querySelector('.aa-status');
+      if (st) st.innerHTML = statusGlyph(success ? 'success' : 'fail');
+      if (!success) row.classList.add('fail');
     }
 
     function renderAffectedFiles(files) {
@@ -1883,6 +1963,7 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
           break;
 
         case 'context': {
+          resetToolGroup();
           if (welcomeEl) welcomeEl.style.display = 'none';
           var d = document.createElement('div');
           d.className = 'context-info';
@@ -1928,13 +2009,19 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
           // Begin a new agent turn; bubble appears lazily on first token
           currentAssistantEl = null;
           currentAssistantText = '';
+          resetToolGroup();
           break;
 
         case 'agentAction':
           appendAgentAction(msg.action);
           break;
 
+        case 'agentActionDone':
+          updateAgentAction(msg.id, msg.success);
+          break;
+
         case 'affectedFiles':
+          resetToolGroup();
           renderAffectedFiles(msg.files);
           break;
 
@@ -1943,6 +2030,7 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
           thinkingEl.style.display = 'none';
           if (!currentAssistantEl) {
             currentAssistantText = '';
+            resetToolGroup();
             currentAssistantEl = addMessage('assistant', '');
           }
           currentAssistantText += msg.text;
@@ -1954,10 +2042,12 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
         case 'done':
           currentAssistantEl = null;
           currentAssistantText = '';
+          resetToolGroup();
           setStreamingState(false);
           break;
 
         case 'error': {
+          resetToolGroup();
           var errDiv = document.createElement('div');
           errDiv.className = 'op-result op-result-error';
           errDiv.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>' +
@@ -2009,6 +2099,7 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
         }
 
         case 'commandOutput': {
+          resetToolGroup();
           var cmdDiv = document.createElement('div');
           cmdDiv.className = 'cmd-output ' + (msg.success ? 'cmd-output-success' : 'cmd-output-error');
 
