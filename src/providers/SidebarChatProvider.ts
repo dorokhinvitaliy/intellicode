@@ -92,6 +92,11 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
           this.abortController?.abort();
           this.postMessageToWebview({ type: 'thinking', show: false });
           break;
+        case 'toggleThinking':
+          await vscode.workspace
+            .getConfiguration('intellicodeFabric')
+            .update('enableThinking', message.enabled, vscode.ConfigurationTarget.Global);
+          break;
       }
     });
   }
@@ -465,6 +470,9 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
   }
 
   private getHtml(): string {
+    const thinkingEnabled = vscode.workspace
+      .getConfiguration('intellicodeFabric')
+      .get<boolean>('enableThinking', true);
     return `<!DOCTYPE html>
 <html lang="ru">
 <head>
@@ -879,6 +887,12 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
         <polyline points="21 3 21 9 15 9"/>
       </svg>
     </button>
+    <button class="header-btn" id="thinkingBtn" onclick="toggleThinking()" title="Размышления модели">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M9 18h6"/><path d="M10 22h4"/>
+        <path d="M12 2a7 7 0 0 0-4 12.74c.5.4.83.95.95 1.57l.05.69h6l.05-.69c.12-.62.45-1.17.95-1.57A7 7 0 0 0 12 2z"/>
+      </svg>
+    </button>
     <button class="header-btn" onclick="openSettings()" title="Настройки">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <circle cx="12" cy="12" r="3"/>
@@ -956,6 +970,24 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
     let currentAssistantEl = null;
     let currentAssistantText = '';
     let isStreaming = false;
+    let thinkingEnabled = ${thinkingEnabled};
+
+    function updateThinkingBtn() {
+      var btn = document.getElementById('thinkingBtn');
+      if (!btn) return;
+      btn.title = thinkingEnabled
+        ? 'Размышления включены — нажмите, чтобы выключить (быстрее)'
+        : 'Размышления выключены — нажмите, чтобы включить';
+      btn.style.color = thinkingEnabled ? 'var(--accent)' : 'var(--fg-dim)';
+      btn.style.opacity = thinkingEnabled ? '1' : '0.45';
+    }
+
+    function toggleThinking() {
+      thinkingEnabled = !thinkingEnabled;
+      updateThinkingBtn();
+      vscode.postMessage({ type: 'toggleThinking', enabled: thinkingEnabled });
+    }
+    updateThinkingBtn();
 
     // ─── Markdown Parser ────────────────────────────
 
