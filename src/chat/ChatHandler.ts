@@ -288,30 +288,7 @@ Well, I have found certain command, then I should run the command inside of the 
     relevantFiles: string[];
     searchResults: SearchResult[];
   }> {
-    const expandedQueries = this.expandQuery(userMessage);
-    const allResultsMap = new Map<string, SearchResult>();
-
-    // Search with expanded queries and merge by max score
-    for (const q of expandedQueries) {
-      const qEmbedding = await this.llmClient.createEmbedding(q);
-      const res = await this.vectorStore.hybridSearch(qEmbedding.embedding, q, topK, this.getWorkspaceRoot());
-
-      for (const r of res) {
-        const existing = allResultsMap.get(r.chunk.id);
-        if (!existing || r.score > existing.score) {
-          allResultsMap.set(r.chunk.id, r);
-        }
-      }
-    }
-
-    // Sort combined results and take topK
-    const mergedResults = Array.from(allResultsMap.values())
-      .sort((a, b) => b.score - a.score)
-      .slice(0, topK);
-
-    let searchResults = mergedResults;
-
-    const filteredResults = this.filterResults(searchResults);
+    const filteredResults = await this.retrieve(userMessage, topK);
     const context = this.buildContext(filteredResults);
     const relevantFiles = [...new Set(filteredResults.map(r => r.chunk.filePath))];
 
@@ -331,6 +308,42 @@ Well, I have found certain command, then I should run the command inside of the 
 
     this.addToHistory(userMessage, response);
     return { response, relevantFiles, searchResults: filteredResults };
+  }
+
+  /**
+   * Retrieve relevant code for a query.
+   * Embeds every expanded query in parallel (was sequential — the main source
+   * of the long pause before the first token) and merges by max score.
+   * Skips entirely when nothing is indexed to avoid pointless embedding calls.
+   */
+  private async retrieve(searchQuery: string, topK: number): Promise<SearchResult[]> {
+    if (this.vectorStore.size() === 0) {
+      return [];
+    }
+
+    const expandedQueries = this.expandQuery(searchQuery);
+    const perQuery = await Promise.all(
+      expandedQueries.map(async q => {
+        const qEmbedding = await this.llmClient.createEmbedding(q);
+        return this.vectorStore.hybridSearch(qEmbedding.embedding, q, topK, this.getWorkspaceRoot());
+      })
+    );
+
+    const allResultsMap = new Map<string, SearchResult>();
+    for (const res of perQuery) {
+      for (const r of res) {
+        const existing = allResultsMap.get(r.chunk.id);
+        if (!existing || r.score > existing.score) {
+          allResultsMap.set(r.chunk.id, r);
+        }
+      }
+    }
+
+    const mergedResults = Array.from(allResultsMap.values())
+      .sort((a, b) => b.score - a.score)
+      .slice(0, topK);
+
+    return this.filterResults(mergedResults);
   }
 
   /**
@@ -389,28 +402,7 @@ Well, I have found certain command, then I should run the command inside of the 
       ? `${retrievalQuery} ${userMessage}`
       : (retrievalQuery || userMessage);
 
-    const expandedQueries = this.expandQuery(searchQuery);
-    const allResultsMap = new Map<string, SearchResult>();
-
-    // Search with expanded queries and merge by max score
-    for (const q of expandedQueries) {
-      const qEmbedding = await this.llmClient.createEmbedding(q);
-      const res = await this.vectorStore.hybridSearch(qEmbedding.embedding, q, topK, this.getWorkspaceRoot());
-
-      for (const r of res) {
-        const existing = allResultsMap.get(r.chunk.id);
-        if (!existing || r.score > existing.score) {
-          allResultsMap.set(r.chunk.id, r);
-        }
-      }
-    }
-
-    // Sort combined results and take topK
-    const mergedResults = Array.from(allResultsMap.values())
-      .sort((a, b) => b.score - a.score)
-      .slice(0, topK);
-
-    let filteredResults = this.filterResults(mergedResults);
+    const filteredResults = await this.retrieve(searchQuery, topK);
     const context = this.buildContext(filteredResults);
     const relevantFiles = [...new Set(filteredResults.map(r => r.chunk.filePath))];
 

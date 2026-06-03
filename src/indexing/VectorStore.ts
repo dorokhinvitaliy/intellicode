@@ -199,6 +199,11 @@ export class VectorStore {
     return Array.from(this.chunks.values());
   }
 
+  /** Number of stored chunks — cheap O(1) check for an empty index. */
+  size(): number {
+    return this.chunks.size;
+  }
+
   getDependencyGraph(): Map<string, string[]> {
     const graph = new Map<string, string[]>();
 

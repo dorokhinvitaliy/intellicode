@@ -1316,6 +1316,8 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
         }
 
         case 'token':
+          // Generation started — drop the "analyzing request" spinner
+          thinkingEl.style.display = 'none';
           currentAssistantText += msg.text;
           if (currentAssistantEl) {
             var contentEl = currentAssistantEl.querySelector('.msg-content');
