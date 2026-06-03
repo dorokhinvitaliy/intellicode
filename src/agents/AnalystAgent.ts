@@ -1,5 +1,6 @@
 import { LLMClient, ChatMessage } from '../llm/LLMClient';
 import { VectorStore } from '../indexing/VectorStore';
+import { stripReasoning } from '../llm/stripReasoning';
 
 export interface AnalysisResult {
   summary: string;
@@ -83,7 +84,7 @@ Analyze the task and return JSON.`,
       },
     ];
 
-    const response = await this.llmClient.chat(messages, { temperature: 0.2 });
+    const response = stripReasoning(await this.llmClient.chat(messages, { temperature: 0.2 }));
 
     try {
       const jsonMatch = response.match(/\{[\s\S]*\}/);
@@ -97,7 +98,8 @@ Analyze the task and return JSON.`,
         codePatterns: parsed.codePatterns || [],
         contextChunks: searchResults.map(r => r.chunk.content),
       };
-    } catch {
+    } catch (err) {
+      console.warn('AnalystAgent: failed to parse JSON response, using fallback:', err);
       return {
         summary: response,
         affectedFiles: [filePath],

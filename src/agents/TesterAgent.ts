@@ -1,6 +1,7 @@
 import { LLMClient, ChatMessage } from '../llm/LLMClient';
 import { VectorStore } from '../indexing/VectorStore';
 import { AnalysisResult } from './AnalystAgent';
+import { stripReasoning } from '../llm/stripReasoning';
 
 export interface TestResult {
   testCode: string;
@@ -74,10 +75,10 @@ Generate complete unit tests in JSON format.`,
       },
     ];
 
-    const response = await this.llmClient.chat(messages, {
+    const response = stripReasoning(await this.llmClient.chat(messages, {
       temperature: 0.2,
       maxTokens: 4096,
-    });
+    }));
 
     try {
       const jsonMatch = response.match(/\{[\s\S]*\}/);
@@ -93,7 +94,8 @@ Generate complete unit tests in JSON format.`,
         scenarios,
         filePath: this.getTestFilePath(filePath),
       };
-    } catch {
+    } catch (err) {
+      console.warn('TesterAgent: failed to parse JSON response, using fallback:', err);
       const testCode = this.extractCode(response);
       return {
         testCode,

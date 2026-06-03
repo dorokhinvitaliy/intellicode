@@ -1,5 +1,6 @@
 import { LLMClient, ChatMessage } from '../llm/LLMClient';
 import { AnalysisResult } from './AnalystAgent';
+import { stripReasoning } from '../llm/stripReasoning';
 
 export interface RefactorResult {
   refactoredCode: string;
@@ -81,10 +82,10 @@ Perform refactoring and return JSON.`,
       },
     ];
 
-    const response = await this.llmClient.chat(messages, {
+    const response = stripReasoning(await this.llmClient.chat(messages, {
       temperature: 0.2,
       maxTokens: 4096,
-    });
+    }));
 
     try {
       const jsonMatch = response.match(/\{[\s\S]*\}/);
@@ -95,7 +96,8 @@ Perform refactoring and return JSON.`,
         explanation: parsed.explanation || '',
         pattern: parsed.pattern,
       };
-    } catch {
+    } catch (err) {
+      console.warn('RefactorAgent: failed to parse JSON response, using fallback:', err);
       return {
         refactoredCode: this.extractCode(response) || code,
         changes: [],

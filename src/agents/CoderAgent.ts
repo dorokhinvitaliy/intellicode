@@ -1,5 +1,6 @@
 import { LLMClient, ChatMessage } from '../llm/LLMClient';
 import { AnalysisResult } from './AnalystAgent';
+import { stripReasoning } from '../llm/stripReasoning';
 
 export interface CodeResult {
   code: string;
@@ -62,10 +63,10 @@ Generate code:`,
       },
     ];
 
-    const response = await this.llmClient.chat(messages, {
+    const response = stripReasoning(await this.llmClient.chat(messages, {
       temperature: 0.2,
       maxTokens: 4096,
-    });
+    }));
 
     const code = this.extractCode(response);
 
