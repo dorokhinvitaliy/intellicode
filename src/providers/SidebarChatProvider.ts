@@ -1080,158 +1080,170 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
   </style>
   <style>
     /* ───────────────────────────────────────────────
-       Modern theme (Cline-inspired) — layered overrides
+       Refined theme — restrained, monochrome, premium
        ─────────────────────────────────────────────── */
     :root {
-      --ic-violet: #a78bfa;
-      --ic-blue: #60a5fa;
-      --ic-cyan: #22d3ee;
-      --ic-grad: linear-gradient(135deg, #a78bfa 0%, #60a5fa 100%);
-      --ic-surface: color-mix(in srgb, var(--fg) 5%, transparent);
-      --ic-surface-2: color-mix(in srgb, var(--fg) 8%, transparent);
-      --ic-border: color-mix(in srgb, var(--fg) 12%, transparent);
-      --ic-border-soft: color-mix(in srgb, var(--fg) 8%, transparent);
-      --ic-radius: 12px;
-      --ic-radius-sm: 8px;
+      --ic-surface: color-mix(in srgb, var(--fg) 3.5%, transparent);
+      --ic-surface-2: color-mix(in srgb, var(--fg) 6%, transparent);
+      --ic-border: color-mix(in srgb, var(--fg) 10%, transparent);
+      --ic-border-soft: color-mix(in srgb, var(--fg) 6.5%, transparent);
+      --ic-hairline: color-mix(in srgb, var(--fg) 8%, transparent);
+      --ic-radius: 10px;
+      --ic-radius-sm: 7px;
+      --ic-fg-mute: color-mix(in srgb, var(--fg) 55%, transparent);
     }
     body {
       -webkit-font-smoothing: antialiased;
+      text-rendering: optimizeLegibility;
       font-size: 13px;
-      line-height: 1.55;
+      line-height: 1.6;
     }
 
     /* ─── Header ─── */
     .header {
-      padding: 12px 14px;
-      border-bottom: 1px solid var(--ic-border-soft);
+      padding: 13px 16px;
+      border-bottom: 1px solid var(--ic-hairline);
       gap: 10px;
-      backdrop-filter: blur(8px);
     }
-    .header-logo { stroke: url(#ic-logo-grad); width: 22px; height: 22px; }
+    .header-logo { stroke: var(--fg); opacity: 0.85; width: 19px; height: 19px; }
     .header h2 {
-      font-size: 11.5px; font-weight: 700; letter-spacing: 0.6px;
-      background: var(--ic-grad);
-      -webkit-background-clip: text; background-clip: text;
-      -webkit-text-fill-color: transparent;
+      font-size: 11px; font-weight: 600; letter-spacing: 1.6px;
+      color: var(--fg); opacity: 0.92;
     }
     .header-btn {
-      width: 30px; height: 30px; border-radius: 8px;
-      transition: background 0.15s, color 0.15s, transform 0.1s;
+      width: 30px; height: 30px; border-radius: 7px;
+      transition: background 0.15s, color 0.15s;
     }
-    .header-btn:hover { background: var(--ic-surface-2); transform: translateY(-1px); }
-    .header-btn:active { transform: translateY(0); }
+    .header-btn:hover { background: var(--ic-surface-2); color: var(--fg); }
 
     /* ─── Messages ─── */
-    .messages { padding: 14px 12px; }
+    .messages { padding: 16px 14px; }
     .messages::-webkit-scrollbar { width: 8px; }
     .messages::-webkit-scrollbar-thumb {
       background: var(--ic-border); border-radius: 8px;
       border: 2px solid transparent; background-clip: padding-box;
     }
-    .messages::-webkit-scrollbar-thumb:hover { background: color-mix(in srgb, var(--fg) 22%, transparent); }
-    .message { margin-bottom: 18px; }
-    .msg-header { gap: 8px; margin-bottom: 8px; }
-    .msg-icon { width: 15px; height: 15px; }
-    .msg-role { font-size: 10.5px; letter-spacing: 0.7px; font-weight: 700; }
+    .messages::-webkit-scrollbar-thumb:hover { background: color-mix(in srgb, var(--fg) 18%, transparent); }
+    .message { margin-bottom: 20px; }
+    .msg-header { gap: 7px; margin-bottom: 8px; }
+    .msg-icon { width: 14px; height: 14px; opacity: 0.8; }
+    .msg-icon-user, .msg-icon-ai { stroke: var(--ic-fg-mute); }
+    .msg-role {
+      font-size: 11px; letter-spacing: 0.2px; font-weight: 600;
+      text-transform: none; color: var(--ic-fg-mute);
+    }
+    .msg-role-user, .msg-role-ai { color: var(--ic-fg-mute); }
+    .msg-content { line-height: 1.65; }
 
-    /* User turn → subtle card; assistant → clean full width */
+    /* User turn → quiet card; assistant → clean full width */
     .message:has(.msg-role-user) .msg-content {
       background: var(--ic-surface);
-      border: 1px solid var(--ic-border-soft);
+      border: 1px solid var(--ic-hairline);
       border-radius: var(--ic-radius);
-      padding: 10px 13px;
+      padding: 11px 14px;
     }
-    .message:has(.msg-role-user) { margin-bottom: 14px; }
+    .message:has(.msg-role-user) { margin-bottom: 16px; }
 
     /* ─── Step / context chip ─── */
     .context-info {
-      padding: 8px 12px; border-radius: 10px;
+      padding: 9px 12px; border-radius: var(--ic-radius-sm);
       background: var(--ic-surface);
-      border: 1px solid var(--ic-border-soft);
-      border-left: 2px solid var(--ic-violet);
-      font-size: 11px; font-weight: 600;
-      margin: 6px 0 10px;
+      border: 1px solid var(--ic-hairline);
+      border-left: none;
+      font-size: 11.5px; font-weight: 500; color: var(--ic-fg-mute);
+      margin: 8px 0 12px;
     }
-    .context-info svg { width: 13px; height: 13px; color: var(--ic-violet); }
+    .context-info svg { width: 13px; height: 13px; color: var(--ic-fg-mute); }
     .context-file {
       background: var(--ic-surface-2); color: var(--fg-dim);
-      border: 1px solid var(--ic-border-soft); border-radius: 6px;
+      border: 1px solid var(--ic-hairline); border-radius: 5px;
       padding: 2px 7px;
     }
 
-    /* ─── Tool / result cards (file ops, cmd output, op result) ─── */
+    /* ─── Tool / result cards ─── */
     .file-ops, .cmd-output, .inlineEditProposal {
       border-radius: var(--ic-radius);
-      border: 1px solid var(--ic-border-soft);
+      border: 1px solid var(--ic-hairline);
       background: var(--ic-surface);
       overflow: hidden;
     }
-    .file-ops { padding: 12px; }
-    .file-ops-title { letter-spacing: 0.5px; }
+    .file-ops { padding: 13px; }
+    .file-ops-title { letter-spacing: 0.4px; color: var(--ic-fg-mute); }
     .file-op-item {
-      background: var(--ic-surface); border: 1px solid var(--ic-border-soft);
-      border-radius: var(--ic-radius-sm); padding: 8px 10px;
+      background: transparent; border: 1px solid var(--ic-hairline);
+      border-radius: var(--ic-radius-sm); padding: 9px 11px;
     }
     .file-op-approve {
-      background: var(--ic-grad); color: #fff; font-weight: 600;
-      border-radius: 6px; padding: 4px 12px;
+      background: var(--fg); color: var(--bg-primary); font-weight: 600;
+      border-radius: 6px; padding: 4px 13px; opacity: 0.92;
     }
-    .file-op-approve:hover { filter: brightness(1.1); }
+    .file-op-approve:hover { opacity: 1; }
     .file-op-reject { border-radius: 6px; }
 
-    .op-result { border-radius: var(--ic-radius-sm); padding: 8px 12px; font-weight: 500; }
-    .op-result-success { background: color-mix(in srgb, var(--success) 12%, transparent); }
-    .op-result-error { background: color-mix(in srgb, var(--error) 12%, transparent); }
+    .op-result { border-radius: var(--ic-radius-sm); padding: 9px 12px; font-weight: 500; }
+    .op-result-success {
+      background: var(--ic-surface);
+      border-left: 2px solid color-mix(in srgb, var(--success) 70%, transparent);
+      color: var(--fg);
+    }
+    .op-result-error {
+      background: var(--ic-surface);
+      border-left: 2px solid color-mix(in srgb, var(--error) 70%, transparent);
+      color: var(--fg);
+    }
+    .op-result svg { opacity: 0.7; }
 
-    .cmd-output-header { padding: 8px 12px; font-weight: 600; letter-spacing: 0.3px; }
+    .cmd-output-header { padding: 8px 12px; font-weight: 600; letter-spacing: 0.2px; }
+    .cmd-output-success .cmd-output-header,
+    .cmd-output-error .cmd-output-header { color: var(--ic-fg-mute); border-left: none; }
     .cmd-output-body {
-      background: color-mix(in srgb, #000 28%, var(--bg-secondary));
+      background: color-mix(in srgb, #000 22%, var(--bg-secondary));
       max-height: 320px; line-height: 1.5;
     }
     .cmd-output-cmd { font-family: var(--vscode-editor-font-family); }
 
     /* ─── Code blocks ─── */
     .code-block-wrapper {
-      border-radius: var(--ic-radius); border: 1px solid var(--ic-border-soft);
+      border-radius: var(--ic-radius); border: 1px solid var(--ic-hairline);
       margin: 10px 0;
     }
     .code-block-header {
       padding: 6px 12px; background: var(--ic-surface-2);
-      border-bottom: 1px solid var(--ic-border-soft);
+      border-bottom: 1px solid var(--ic-hairline);
     }
-    .code-block-lang { color: var(--ic-blue); font-weight: 600; }
+    .code-block-lang { color: var(--ic-fg-mute); font-weight: 600; letter-spacing: 0.4px; }
     .code-btn { border-radius: 5px; transition: background 0.15s; }
     .msg-content code:not(.code-block-code) {
-      background: var(--ic-surface-2); border: 1px solid var(--ic-border-soft);
+      background: var(--ic-surface-2); border: 1px solid var(--ic-hairline);
       border-radius: 5px; padding: 1px 5px; font-size: 12px;
     }
 
     /* ─── Reasoning block ─── */
     .thinking-block {
-      border: 1px solid color-mix(in srgb, var(--ic-violet) 30%, transparent);
-      border-radius: 10px;
-      background: color-mix(in srgb, var(--ic-violet) 7%, transparent);
+      border: 1px solid var(--ic-hairline);
+      border-radius: var(--ic-radius-sm);
+      background: var(--ic-surface);
     }
+    .thinking-block summary { color: var(--ic-fg-mute); }
 
     /* ─── Thinking indicator ─── */
-    .thinking { padding: 10px 14px; font-size: 12px; }
-    .thinking-dots span { background: var(--ic-violet); }
+    .thinking { padding: 11px 16px; font-size: 12px; color: var(--ic-fg-mute); }
+    .thinking-dots span { background: var(--ic-fg-mute); }
 
     /* ─── Input area ─── */
     .input-area {
-      padding: 12px; border-top: 1px solid var(--ic-border-soft);
+      padding: 14px; border-top: 1px solid var(--ic-hairline);
     }
     .input-wrapper {
       gap: 8px; align-items: flex-end;
       background: var(--bg-input);
       border: 1px solid var(--ic-border);
-      border-radius: 14px;
-      padding: 6px 6px 6px 6px;
-      transition: border-color 0.15s, box-shadow 0.15s;
+      border-radius: 12px;
+      padding: 6px;
+      transition: border-color 0.15s;
     }
     .input-wrapper:focus-within {
-      border-color: color-mix(in srgb, var(--ic-blue) 60%, transparent);
-      box-shadow: 0 0 0 3px color-mix(in srgb, var(--ic-blue) 16%, transparent);
+      border-color: color-mix(in srgb, var(--fg) 28%, transparent);
     }
     textarea {
       background: transparent; border: none; padding: 7px 8px;
@@ -1239,48 +1251,42 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
     }
     textarea:focus { outline: none; border: none; }
     .send-btn, .stop-btn {
-      width: 38px; height: 38px; border-radius: 11px; padding: 0;
-      flex-shrink: 0; transition: filter 0.15s, transform 0.1s;
+      width: 36px; height: 36px; border-radius: 9px; padding: 0;
+      flex-shrink: 0; transition: opacity 0.15s, background 0.15s;
     }
-    .send-btn { background: var(--ic-grad); }
-    .send-btn:hover { filter: brightness(1.12); transform: translateY(-1px); }
+    .send-btn { background: var(--fg); color: var(--bg-primary); opacity: 0.9; }
+    .send-btn:hover { opacity: 1; background: var(--fg); }
+    .send-btn svg { width: 16px; height: 16px; }
     .stop-btn {
-      background: linear-gradient(135deg, #f87171, #ef4444);
+      background: transparent;
+      border: 1px solid var(--ic-border);
+      color: var(--fg);
       font-size: 0; gap: 0;
     }
-    .stop-btn svg { width: 16px; height: 16px; }
-    .stop-btn:hover { filter: brightness(1.1); transform: translateY(-1px); }
+    .stop-btn svg { width: 15px; height: 15px; }
+    .stop-btn:hover { background: var(--ic-surface-2); }
 
     /* ─── Welcome ─── */
-    .welcome { padding: 28px 18px; }
-    .welcome-icon svg { stroke: url(#ic-logo-grad); width: 44px; height: 44px; }
+    .welcome { padding: 32px 20px; }
+    .welcome-icon svg { stroke: var(--fg); opacity: 0.4; width: 40px; height: 40px; }
     .welcome h3 {
-      font-size: 15px;
-      background: var(--ic-grad);
-      -webkit-background-clip: text; background-clip: text;
-      -webkit-text-fill-color: transparent;
+      font-size: 14px; font-weight: 600; letter-spacing: 0.3px;
+      color: var(--fg);
     }
+    .welcome p { color: var(--ic-fg-mute); }
     .welcome-btn {
-      border-radius: 10px; border: 1px solid var(--ic-border-soft);
-      background: var(--ic-surface); padding: 10px 13px;
-      transition: background 0.15s, transform 0.1s, border-color 0.15s;
+      border-radius: 9px; border: 1px solid var(--ic-hairline);
+      background: var(--ic-surface); padding: 11px 14px;
+      transition: background 0.15s, border-color 0.15s;
     }
     .welcome-btn:hover {
-      background: var(--ic-surface-2); transform: translateY(-1px);
-      border-color: color-mix(in srgb, var(--ic-violet) 35%, transparent);
+      background: var(--ic-surface-2);
+      border-color: var(--ic-border);
     }
-    .welcome-btn svg { color: var(--ic-violet); }
+    .welcome-btn svg { color: var(--ic-fg-mute); }
   </style>
 </head>
 <body>
-  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
-    <defs>
-      <linearGradient id="ic-logo-grad" x1="0" y1="0" x2="1" y2="1">
-        <stop offset="0%" stop-color="#a78bfa"/>
-        <stop offset="100%" stop-color="#60a5fa"/>
-      </linearGradient>
-    </defs>
-  </svg>
   <div class="header">
     <svg class="header-logo" viewBox="0 0 24 24">
       <path d="M12 2L2 7l10 5 10-5-10-5z" stroke-linecap="round" stroke-linejoin="round"/>
@@ -1455,13 +1461,13 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
           var before = text.substring(0, tStart);
           var thinkContent = text.substring(tStart + thinkOpen.length, tEnd);
           var after = text.substring(tEnd + thinkClose.length);
-          thinkingHtml = L + 'details class="thinking-block"' + R + L + 'summary' + R + String.fromCharCode(0xD83D, 0xDCAD) + ' Reasoning' + L + '/summary' + R + L + 'div class="thinking-content"' + R + escapeHtml(thinkContent.trim()) + L + '/div' + R + L + '/details' + R;
+          thinkingHtml = L + 'details class="thinking-block"' + R + L + 'summary' + R + 'Reasoning' + L + '/summary' + R + L + 'div class="thinking-content"' + R + escapeHtml(thinkContent.trim()) + L + '/div' + R + L + '/details' + R;
           visibleText = before + after;
         } else {
           // Unclosed thinking block (streaming)
           var before2 = text.substring(0, tStart);
           var thinkContent2 = text.substring(tStart + thinkOpen.length);
-          thinkingHtml = L + 'details class="thinking-block" open' + R + L + 'summary' + R + String.fromCharCode(0xD83D, 0xDCAD) + ' Reasoning...' + L + '/summary' + R + L + 'div class="thinking-content"' + R + escapeHtml(thinkContent2.trim()) + L + '/div' + R + L + '/details' + R;
+          thinkingHtml = L + 'details class="thinking-block" open' + R + L + 'summary' + R + 'Reasoning…' + L + '/summary' + R + L + 'div class="thinking-content"' + R + escapeHtml(thinkContent2.trim()) + L + '/div' + R + L + '/details' + R;
           visibleText = before2;
         }
       }
@@ -1589,7 +1595,7 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
 
       var icon = role === 'user' ? SVG_USER : SVG_AI;
       var roleClass = role === 'user' ? 'msg-role-user' : 'msg-role-ai';
-      var roleLabel = role === 'user' ? 'You' : 'AI Assistant';
+      var roleLabel = role === 'user' ? 'You' : 'Assistant';
 
       var renderedContent = role === 'user'
         ? '<p>' + escapeHtml(content) + '</p>'
