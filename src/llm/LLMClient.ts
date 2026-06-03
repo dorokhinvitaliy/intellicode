@@ -6,6 +6,7 @@ export interface LLMConfig {
   endpoint: string;
   model: string;
   embeddingModel: string;
+  enableThinking?: boolean;
 }
 
 export interface ChatMessage {
@@ -90,6 +91,31 @@ export class LLMClient {
     }
   }
 
+  /**
+   * Applies the thinking toggle. For reasoning models (qwen3) the soft switch
+   * `/no_think` in the prompt disables the <think> phase, yielding faster,
+   * shorter answers. Harmless for non-reasoning models.
+   */
+  private applyThinkingMode(messages: ChatMessage[]): ChatMessage[] {
+    if (this.config.enableThinking !== false) {
+      return messages;
+    }
+    const marker = '/no_think';
+    const copy = messages.map(m => ({ ...m }));
+    const sys = copy.find(m => m.role === 'system');
+    if (sys) {
+      if (!sys.content.includes(marker)) { sys.content += `\n${marker}`; }
+      return copy;
+    }
+    for (let i = copy.length - 1; i >= 0; i--) {
+      if (copy[i].role === 'user') {
+        if (!copy[i].content.includes(marker)) { copy[i].content += `\n${marker}`; }
+        break;
+      }
+    }
+    return copy;
+  }
+
   async chat(messages: ChatMessage[], options?: {
     temperature?: number;
     maxTokens?: number;
@@ -103,11 +129,13 @@ export class LLMClient {
       throw new Error('LLM не настроен. Откройте настройки: Ctrl+, → intellicodeFabric');
     }
 
+    const prepared = this.applyThinkingMode(messages);
+
     if (this.config.provider === 'anthropic') {
-      return this.chatAnthropic(messages, options);
+      return this.chatAnthropic(prepared, options);
     }
 
-    return this.chatOpenAICompatible(messages, options);
+    return this.chatOpenAICompatible(prepared, options);
   }
 
   async *chatStream(messages: ChatMessage[], options?: {
@@ -119,10 +147,12 @@ export class LLMClient {
       throw new Error('LLM не настроен');
     }
 
+    const prepared = this.applyThinkingMode(messages);
+
     // Anthropic не поддерживает OpenAI-совместимый /chat/completions стрим —
     // выполняем обычный запрос и отдаём ответ одним куском.
     if (this.config.provider === 'anthropic') {
-      const full = await this.chatAnthropic(messages, options);
+      const full = await this.chatAnthropic(prepared, options);
       if (full) { yield full; }
       return;
     }
@@ -133,7 +163,7 @@ export class LLMClient {
 
     const body: Record<string, unknown> = {
       model,
-      messages: messages.map(m => ({ role: m.role, content: m.content })),
+      messages: prepared.map(m => ({ role: m.role, content: m.content })),
       temperature: options?.temperature ?? 0.3,
       max_tokens: options?.maxTokens ?? 4096,
       stream: true,

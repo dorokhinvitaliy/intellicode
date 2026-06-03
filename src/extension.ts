@@ -27,6 +27,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     endpoint: config.get<string>('apiEndpoint', ''),
     model: config.get<string>('model', 'gpt-4o'),
     embeddingModel: config.get<string>('embeddingModel', 'text-embedding-3-small'),
+    enableThinking: config.get<boolean>('enableThinking', true),
   });
 
   // ─── Генерация уникального ID воркспейса ───
@@ -343,6 +344,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           endpoint: newConfig.get<string>('apiEndpoint', ''),
           model: newConfig.get<string>('model', 'gpt-4o'),
           embeddingModel: newConfig.get<string>('embeddingModel', 'text-embedding-3-small'),
+          enableThinking: newConfig.get<boolean>('enableThinking', true),
         });
       }
     })

@@ -159,6 +159,11 @@
           "default": "nomic-embed-text",
           "description": "Embedding model. For Ollama: nomic-embed-text. For OpenAI: text-embedding-3-small"
         },
+        "intellicodeFabric.enableThinking": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable model reasoning (<think>). Disable for reasoning models like qwen3 to get faster, shorter answers (appends /no_think to the prompt)."
+        },
         "intellicodeFabric.maxContextFiles": {
           "type": "number",
           "default": 10,
