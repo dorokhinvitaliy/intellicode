@@ -323,12 +323,18 @@ Agent rules:
    blocks. Use CREATE_FILE only for NEW files. Use EDIT_FILE only when you truly need
    to replace the whole content of a small file.
 4. ALWAYS READ a file before you patch or edit it, so SEARCH matches the file exactly.
-5. After writing code/tests you MAY run the relevant command (test runner, build)
-   via EXECUTE to verify, then fix failures.
-6. If a command FAILS twice with essentially the same error, STOP retrying it —
-   briefly explain the problem and output <<<DONE>>>. Never loop on the same failing command.
-7. Do NOT output <<<DONE>>> until every required file and action is complete.
-8. Keep each turn focused; rely on the [OBSERVATIONS] you receive to decide the next step.
+5. After writing code/tests you SHOULD run the relevant command (test runner, lint,
+   build, type-check) via EXECUTE to verify your work.
+6. A non-zero exit from tests/lint/build is NORMAL FEEDBACK, not a reason to stop.
+   READ the reported errors, fix the ROOT CAUSE in the code (e.g. remove unused vars,
+   add a precise type instead of "any", add the missing hook dependency), then RE-RUN
+   to confirm. Keep iterating as long as the set of errors is changing — that means
+   you are making progress.
+7. ONLY give up if, after your fix, re-running the SAME command returns the EXACT same
+   errors with no change (you are stuck). Then briefly explain what is blocking you and
+   output <<<DONE>>>.
+8. Do NOT output <<<DONE>>> while there are still fixable errors or unfinished work.
+9. Keep each turn focused; rely on the [OBSERVATIONS] you receive to decide the next step.
 `;
 
   getAgentSystemPrompt(): string {

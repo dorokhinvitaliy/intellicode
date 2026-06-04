@@ -436,8 +436,8 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
 
   // ─── Autonomous agent loop ────────────────────────────────
 
-  private static AGENT_MAX_STEPS = 20;
-  private static AGENT_MAX_OPS = 80;
+  private static AGENT_MAX_STEPS = 30;
+  private static AGENT_MAX_OPS = 120;
 
   /**
    * Runs a task as an autonomous agent: streams a step, executes every action
@@ -454,8 +454,8 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
     const rootPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
     let opCount = 0;
     let actionId = 0;
-    let lastFailedCmd = '';
-    let sameFailCount = 0;
+    let lastFailSig = '';
+    let stallCount = 0;
     const affected: { path: string; kind: string }[] = [];
 
     try {
@@ -521,7 +521,9 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
           });
 
           const res = await this.fileOps.executeAgentOperation(op);
-          this.postMessageToWebview({ type: 'agentActionDone', id: aid, success: res.success });
+          // A failing command (tests/lint) is feedback to analyze, not an agent error → amber
+          const status = res.success ? 'success' : (op.type === 'execute' ? 'warn' : 'fail');
+          this.postMessageToWebview({ type: 'agentActionDone', id: aid, status });
 
           let line = `${op.type.toUpperCase()} ${target} → ${res.success ? 'OK' : 'FAILED: ' + res.message}`;
           if (res.output) {
@@ -537,14 +539,17 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
           }
           observations.push(line);
 
-          // Loop guard: stop if the same command keeps failing
+          // Stall detection: only a guard against NO progress, not against failures.
+          // A failing command is normal feedback; we stop only if re-running yields the
+          // EXACT same errors (no change), which means the agent is truly stuck.
           if (op.type === 'execute') {
             if (!res.success) {
-              sameFailCount = op.command === lastFailedCmd ? sameFailCount + 1 : 1;
-              lastFailedCmd = op.command || '';
-            } else if (op.command === lastFailedCmd) {
-              sameFailCount = 0;
-              lastFailedCmd = '';
+              const sig = this.normalizeOutput((op.command || '') + '\n' + (res.output || ''));
+              stallCount = sig === lastFailSig ? stallCount + 1 : 1;
+              lastFailSig = sig;
+            } else {
+              stallCount = 0;
+              lastFailSig = '';
             }
           }
 
@@ -557,11 +562,11 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
           }
         }
 
-        // Loop guard: a command that fails repeatedly → stop instead of spinning forever
-        if (sameFailCount >= 2) {
+        // Stall guard: the same errors keep repeating with no change → stop (genuinely stuck)
+        if (stallCount >= 3) {
           this.postMessageToWebview({
-            type: 'error',
-            message: `Команда «${lastFailedCmd}» повторно завершается с ошибкой — агент остановлен, чтобы не зациклиться.`,
+            type: 'agentNotice',
+            text: 'Команда выдаёт одни и те же ошибки несколько раз подряд — продвинуться автоматически не получается. Останавливаюсь, чтобы не крутиться впустую.',
           });
           break;
         }
@@ -589,6 +594,17 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
       this.postMessageToWebview({ type: 'thinking', show: false });
       this.postMessageToWebview({ type: 'done' });
     }
+  }
+
+  /** Normalize command output to compare runs for "no progress" detection. */
+  private normalizeOutput(s: string): string {
+    return s
+      .replace(/\r/g, '')
+      .split('\n')
+      .map(l => l.trim())
+      .filter(Boolean)
+      .join('\n')
+      .slice(0, 2500);
   }
 
   /** Keep the agent transcript bounded: system + task + most recent turns. */
@@ -1372,6 +1388,20 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
     .aa-running { color: var(--ic-fg-mute); }
     .aa-ok { color: var(--success); }
     .aa-bad { color: var(--error); }
+    .aa-warn { color: var(--warn); }
+
+    /* ─── Agent notice (soft, non-error) ─── */
+    .notice {
+      display: flex; align-items: flex-start; gap: 9px;
+      margin: 10px 0; padding: 10px 13px;
+      border-radius: var(--ic-radius);
+      border: 1px solid var(--ic-hairline);
+      border-left: 2px solid var(--warn);
+      background: var(--ic-surface);
+      font-size: 12px; line-height: 1.5; color: var(--fg-dim);
+      animation: slideIn 0.25s ease;
+    }
+    .notice svg { width: 15px; height: 15px; flex-shrink: 0; color: var(--warn); margin-top: 1px; }
     .aa-spin { animation: aaspin 0.8s linear infinite; transform-origin: center; }
     @keyframes aaspin { to { transform: rotate(360deg); } }
     .aa-verb { color: var(--ic-fg-mute); font-weight: 500; font-size: 12px; white-space: nowrap; }
@@ -1710,6 +1740,7 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
     var ICON_TOOLS = svgWrap('<polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>');
     var ICON_CHECK = svgWrap('<polyline points="20 6 9 17 4 12"/>');
     var ICON_X = svgWrap('<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>');
+    var ICON_WARN = svgWrap('<circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>');
     var ICON_SPINNER = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" class="aa-spin"><path d="M21 12a9 9 0 1 1-6.22-8.56"/></svg>';
 
     function shortPath(p) {
@@ -1721,6 +1752,7 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
     function statusGlyph(status) {
       if (status === 'success') return '<span class="aa-ok">' + ICON_CHECK + '</span>';
       if (status === 'fail') return '<span class="aa-bad">' + ICON_X + '</span>';
+      if (status === 'warn') return '<span class="aa-warn">' + ICON_WARN + '</span>';
       return '<span class="aa-running">' + ICON_SPINNER + '</span>';
     }
 
@@ -1769,12 +1801,12 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
       messagesEl.scrollTop = messagesEl.scrollHeight;
     }
 
-    function updateAgentAction(id, success) {
+    function updateAgentAction(id, status) {
       var row = messagesEl.querySelector('.agent-action[data-aid="' + id + '"]');
       if (!row) return;
       var st = row.querySelector('.aa-status');
-      if (st) st.innerHTML = statusGlyph(success ? 'success' : 'fail');
-      if (!success) row.classList.add('fail');
+      if (st) st.innerHTML = statusGlyph(status);
+      if (status === 'fail') row.classList.add('fail');
     }
 
     function renderAffectedFiles(files) {
@@ -2044,8 +2076,18 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
           break;
 
         case 'agentActionDone':
-          updateAgentAction(msg.id, msg.success);
+          updateAgentAction(msg.id, msg.status);
           break;
+
+        case 'agentNotice': {
+          resetToolGroup();
+          var noticeEl = document.createElement('div');
+          noticeEl.className = 'notice';
+          noticeEl.innerHTML = ICON_WARN + '<span>' + escapeHtml(msg.text) + '</span>';
+          messagesEl.appendChild(noticeEl);
+          messagesEl.scrollTop = messagesEl.scrollHeight;
+          break;
+        }
 
         case 'affectedFiles':
           resetToolGroup();
