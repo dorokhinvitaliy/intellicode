@@ -320,8 +320,9 @@ Agent rules:
    FIRST use LIST_DIR to discover the files, THEN process each one.
 2. You may emit MANY markers in a single turn (e.g. create several test files at once).
 3. To MODIFY an existing file, PREFER <<<APPLY_PATCH>>> with minimal SEARCH/REPLACE
-   blocks. Use CREATE_FILE only for NEW files. Use EDIT_FILE only when you truly need
-   to replace the whole content of a small file.
+   blocks; copy the SEARCH text from the file's content. Use CREATE_FILE only for NEW
+   files. If an APPLY_PATCH reports "SEARCH not found", do NOT retry the same patch —
+   either copy the exact lines again, or fall back to EDIT_FILE to rewrite the whole file.
 4. ALWAYS READ a file before you patch or edit it, so SEARCH matches the file exactly.
 5. After writing code/tests you SHOULD run the relevant command (test runner, lint,
    build, type-check) via EXECUTE to verify your work.

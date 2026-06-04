@@ -309,15 +309,15 @@ export class FileOperationsHandler {
       let applied = 0;
 
       for (const p of op.patches) {
-        const idx = content.indexOf(p.search);
-        if (idx === -1) {
-          const snippet = p.search.replace(/\s+/g, ' ').slice(0, 60);
+        const next = this.applyPatchBlock(content, p.search, p.replace);
+        if (!next.ok) {
+          const snippet = p.search.replace(/\s+/g, ' ').trim().slice(0, 60);
           return {
             success: false,
-            message: `Фрагмент не найден в ${op.filePath} (блок ${applied + 1}: "${snippet}…"). Перечитайте файл и повторите с точным текстом.`,
+            message: `SEARCH-фрагмент не найден в ${op.filePath} (блок ${applied + 1}: "${snippet}…"). Скопируйте текст SEARCH ДОСЛОВНО из содержимого файла. Если не получается — используйте EDIT_FILE для полной перезаписи этого файла.`,
           };
         }
-        content = content.slice(0, idx) + p.replace + content.slice(idx + p.search.length);
+        content = next.content;
         applied++;
       }
 
@@ -332,6 +332,44 @@ export class FileOperationsHandler {
       const errMsg = err instanceof Error ? err.message : String(err);
       return { success: false, message: `Ошибка: ${errMsg}` };
     }
+  }
+
+  /**
+   * Apply one SEARCH/REPLACE block tolerantly:
+   *  1. exact substring match;
+   *  2. fallback: match by lines ignoring leading/trailing whitespace, so small
+   *     indentation/whitespace differences from the model still apply.
+   */
+  private applyPatchBlock(content: string, search: string, replace: string): { content: string; ok: boolean } {
+    // 1. Exact
+    const idx = content.indexOf(search);
+    if (idx !== -1) {
+      return { content: content.slice(0, idx) + replace + content.slice(idx + search.length), ok: true };
+    }
+
+    // 2. Whitespace-tolerant line match
+    const fileLines = content.split('\n');
+    const searchLines = search.replace(/\n$/, '').split('\n');
+    const trim = (s: string) => s.trim();
+    const needle = searchLines.map(trim);
+    // Skip empty leading/trailing needle lines so framing newlines don't break matching
+    while (needle.length && needle[0] === '') { needle.shift(); searchLines.shift(); }
+    while (needle.length && needle[needle.length - 1] === '') { needle.pop(); searchLines.pop(); }
+    if (needle.length === 0) { return { content, ok: false }; }
+
+    for (let i = 0; i + needle.length <= fileLines.length; i++) {
+      let match = true;
+      for (let j = 0; j < needle.length; j++) {
+        if (fileLines[i + j].trim() !== needle[j]) { match = false; break; }
+      }
+      if (match) {
+        const replaceLines = replace.replace(/\n$/, '').split('\n');
+        const merged = [...fileLines.slice(0, i), ...replaceLines, ...fileLines.slice(i + needle.length)];
+        return { content: merged.join('\n'), ok: true };
+      }
+    }
+
+    return { content, ok: false };
   }
 
   private async deleteFileDirect(op: FileOperation): Promise<OperationResult> {
