@@ -14,6 +14,7 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
   private inlineEditor?: any;
   private feedbackDepth = 0;
   private lastUserQuery = '';
+  private lastAgentTask = '';
 
   private abortController?: AbortController;
 
@@ -53,10 +54,14 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
           this.lastUserQuery = message.text;
           // Try smart command routing first (bypasses LLM for simple commands)
           if (await this.trySmartRoute(message.text)) { break; }
-          // Questions get a one-shot answer; commands run the autonomous agent loop
-          if (this.isQuestionMessage(message.text)) {
+          // "Continue" resumes the last agent task (it re-reads file state and proceeds)
+          if (this.isContinueMessage(message.text) && this.lastAgentTask) {
+            await this.runAgent(this.lastAgentTask);
+          } else if (this.isQuestionMessage(message.text)) {
+            // Questions get a one-shot answer
             await this.handleChatMessage(message.text);
           } else {
+            // Commands run the autonomous agent loop
             await this.runAgent(message.text);
           }
           break;
@@ -436,15 +441,22 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
 
   // ─── Autonomous agent loop ────────────────────────────────
 
-  private static AGENT_MAX_STEPS = 30;
-  private static AGENT_MAX_OPS = 120;
+  private static AGENT_MAX_STEPS = 100;
+  private static AGENT_MAX_OPS = 500;
 
   /**
    * Runs a task as an autonomous agent: streams a step, executes every action
    * (file ops + commands) automatically, feeds the results back, and repeats
    * until the model emits <<<DONE>>> or a safety limit is hit.
    */
+  /** Detect a short "continue" message to resume the previous agent task. */
+  private isContinueMessage(text: string): boolean {
+    const t = text.toLowerCase().trim();
+    return /^(продолжай|продолжи|продолжить|дальше|continue|go on|keep going)\b/.test(t);
+  }
+
   private async runAgent(task: string): Promise<void> {
+    this.lastAgentTask = task;
     this.postMessageToWebview({ type: 'thinking', show: true });
 
     this.abortController?.abort();
@@ -456,6 +468,8 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
     let actionId = 0;
     let lastFailSig = '';
     let stallCount = 0;
+    let emptyStreak = 0;
+    let endedCleanly = false;
     const affected: { path: string; kind: string }[] = [];
 
     try {
@@ -562,22 +576,47 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
           }
         }
 
-        // Stall guard: the same errors keep repeating with no change → stop (genuinely stuck)
-        if (stallCount >= 3) {
+        // Completion: the model explicitly signalled it is finished.
+        if (done) { endedCleanly = true; break; }
+
+        // No actions this turn: nudge to act or finish rather than stopping.
+        if (observations.length === 0) {
+          emptyStreak++;
+          if (emptyStreak >= 3) { endedCleanly = true; break; } // truly idle backstop
+          messages.push({
+            role: 'user',
+            content: 'You performed no action and did not signal completion. If the task is FULLY complete, reply with <<<DONE>>> and a short summary. Otherwise, perform the next concrete action now.',
+          });
+          continue;
+        }
+        emptyStreak = 0;
+
+        // Severe-stall backstop: same errors with zero change many times → genuinely stuck.
+        if (stallCount >= 6) {
           this.postMessageToWebview({
             type: 'agentNotice',
-            text: 'Команда выдаёт одни и те же ошибки несколько раз подряд — продвинуться автоматически не получается. Останавливаюсь, чтобы не крутиться впустую.',
+            text: 'Команда выдаёт абсолютно одни и те же ошибки много раз подряд — продвинуться не удаётся. Останавливаюсь. Напишите «продолжай», если хотите, чтобы я попробовал ещё.',
           });
+          endedCleanly = true;
           break;
         }
 
-        // Stop after executing this turn's actions if the model signalled completion,
-        // or if it produced no actions at all (final prose answer)
-        if (done || observations.length === 0) { break; }
+        // Soft stall: nudge toward a different approach, but keep going.
+        if (stallCount >= 2) {
+          observations.push('NOTE: the previous command returned the SAME errors as before — your last change did not affect them. Do NOT repeat the same edit. Inspect the exact failing lines and try a DIFFERENT fix, or address a different error first.');
+        }
 
         messages.push({
           role: 'user',
-          content: `[OBSERVATIONS]\n${observations.join('\n\n')}\n\nContinue. Perform the next action, or output <<<DONE>>> with a brief summary when the task is fully complete.`,
+          content: `[OBSERVATIONS]\n${observations.join('\n\n')}\n\nContinue working until the task is fully complete. Perform the next action, or output <<<DONE>>> only when everything is finished and verified.`,
+        });
+      }
+
+      // Hit the step backstop without finishing — tell the user so they can resume.
+      if (!endedCleanly && !signal.aborted) {
+        this.postMessageToWebview({
+          type: 'agentNotice',
+          text: `Достигнут предел в ${SidebarChatProvider.AGENT_MAX_STEPS} шагов, задача ещё не завершена. Напишите «продолжай», чтобы я продолжил.`,
         });
       }
     } catch (error: any) {
