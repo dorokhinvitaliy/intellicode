@@ -469,6 +469,7 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
     let lastFailSig = '';
     let stallCount = 0;
     let emptyStreak = 0;
+    let editsSinceLastCmd = 0;
     let endedCleanly = false;
     const affected: { path: string; kind: string }[] = [];
 
@@ -505,6 +506,7 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
         const done = /<<<\s*DONE\s*>>>/i.test(actionable);
 
         const observations: string[] = [];
+        let pointlessRerun = false;
 
         // LIST_DIR — file discovery
         for (const dir of this.parseListDirOps(actionable)) {
@@ -539,10 +541,13 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
           const status = res.success ? 'success' : (op.type === 'execute' ? 'warn' : 'fail');
           this.postMessageToWebview({ type: 'agentActionDone', id: aid, status });
 
-          let line = `${op.type.toUpperCase()} ${target} → ${res.success ? 'OK' : 'FAILED: ' + res.message}`;
-          if (res.output) {
-            line += `\nOutput:\n${res.output.slice(0, 1500)}`;
-            if (op.type === 'execute') {
+          let line: string;
+          if (op.type === 'execute') {
+            line = res.success
+              ? `EXECUTE ${target} → passed (exit 0).`
+              : `EXECUTE ${target} → exited non-zero. A non-zero exit from lint/tests/build is NORMAL feedback (warnings or errors), NOT an agent failure. Read the output, FIX the reported issues in the code, then re-run. Do NOT re-run this command unless you changed something.`;
+            if (res.output) {
+              line += `\nOutput:\n${res.output.slice(0, 1800)}`;
               this.postMessageToWebview({
                 type: 'commandOutput',
                 output: res.output.slice(0, 2000),
@@ -550,25 +555,30 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
                 success: res.success,
               });
             }
+          } else {
+            line = `${op.type.toUpperCase()} ${target} → ${res.success ? 'OK' : 'FAILED: ' + res.message}`;
+            if (res.output) { line += `\nOutput:\n${res.output.slice(0, 1500)}`; }
           }
           observations.push(line);
 
-          // Stall detection: only a guard against NO progress, not against failures.
-          // A failing command is normal feedback; we stop only if re-running yields the
-          // EXACT same errors (no change), which means the agent is truly stuck.
+          // Progress tracking: distinguish "trying but failing" from "pointlessly re-running".
           if (op.type === 'execute') {
             if (!res.success) {
               const sig = this.normalizeOutput((op.command || '') + '\n' + (res.output || ''));
+              // Same command + same output AND nothing was edited since the last run = pure no-op loop.
+              if (sig === lastFailSig && editsSinceLastCmd === 0) { pointlessRerun = true; }
               stallCount = sig === lastFailSig ? stallCount + 1 : 1;
               lastFailSig = sig;
             } else {
               stallCount = 0;
               lastFailSig = '';
             }
+            editsSinceLastCmd = 0;
           }
 
           if (res.success && op.filePath && (op.type === 'create' || op.type === 'edit' || op.type === 'patch' || op.type === 'delete')) {
             affected.push({ path: op.filePath, kind: op.type === 'patch' ? 'edit' : op.type });
+            editsSinceLastCmd++;
           }
           // Re-index created/edited files so later steps see them
           if (res.success && op.filePath && op.type !== 'delete') {
@@ -591,11 +601,22 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
         }
         emptyStreak = 0;
 
-        // Severe-stall backstop: same errors with zero change many times → genuinely stuck.
+        // Pointless re-run: the agent re-ran the SAME command with the SAME output and
+        // made NO code changes since the last run. Re-running cannot help → stop the loop.
+        if (pointlessRerun) {
+          this.postMessageToWebview({
+            type: 'agentNotice',
+            text: 'Команда перезапускается без изменений в коде и даёт тот же результат. Похоже, это предупреждения/проблемы, которые не относятся к задаче или требуют вашего решения — останавливаюсь, чтобы не крутиться впустую.',
+          });
+          endedCleanly = true;
+          break;
+        }
+
+        // Severe-stall backstop: same errors with zero change many times, even while editing.
         if (stallCount >= 6) {
           this.postMessageToWebview({
             type: 'agentNotice',
-            text: 'Команда выдаёт абсолютно одни и те же ошибки много раз подряд — продвинуться не удаётся. Останавливаюсь. Напишите «продолжай», если хотите, чтобы я попробовал ещё.',
+            text: 'Не удаётся устранить одни и те же ошибки несколько попыток подряд — останавливаюсь. Напишите «продолжай», если хотите, чтобы я попробовал ещё.',
           });
           endedCleanly = true;
           break;
@@ -603,7 +624,7 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
 
         // Soft stall: nudge toward a different approach, but keep going.
         if (stallCount >= 2) {
-          observations.push('NOTE: the previous command returned the SAME errors as before — your last change did not affect them. Do NOT repeat the same edit. Inspect the exact failing lines and try a DIFFERENT fix, or address a different error first.');
+          observations.push('NOTE: the previous command returned the SAME errors as before — your last change did not affect them. Do NOT repeat the same edit or re-run the command unchanged. Inspect the exact failing lines and try a DIFFERENT fix, or finish if these issues are unrelated to the task.');
         }
 
         messages.push({

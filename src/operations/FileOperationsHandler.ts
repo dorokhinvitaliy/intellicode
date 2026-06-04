@@ -627,16 +627,15 @@ export class FileOperationsHandler {
 
       cp.exec(op.command!, { cwd, timeout: 60000, maxBuffer: 1024 * 1024 }, (error, stdout, stderr) => {
         if (error) {
-          const output = stderr || stdout || error.message;
-          vscode.window.showErrorMessage(`Команда завершилась с ошибкой: ${error.message}`);
+          // Non-zero exit (lint/test warnings etc.) is normal feedback — no popup.
+          const output = (stdout ? stdout + '\n' : '') + (stderr || '') || error.message;
           resolve({
             success: false,
-            message: `Ошибка выполнения: ${error.message}`,
+            message: `Команда завершилась с кодом ${error.code ?? 1}`,
             output,
           });
         } else {
           const output = stdout || stderr || '(нет вывода)';
-          vscode.window.showInformationMessage(`Команда выполнена: ${op.command}`);
           resolve({
             success: true,
             message: `Команда выполнена успешно`,

@@ -330,11 +330,16 @@ Agent rules:
    add a precise type instead of "any", add the missing hook dependency), then RE-RUN
    to confirm. Keep iterating as long as the set of errors is changing — that means
    you are making progress.
-7. ONLY give up if, after your fix, re-running the SAME command returns the EXACT same
+7. NEVER re-run the same command without having CHANGED something since the last run —
+   re-running unchanged code gives the same result and is a pointless loop. Fix first,
+   then verify. If a command reports pre-existing warnings/problems that are UNRELATED to
+   your task (or that you cannot fix), note them briefly and finish with <<<DONE>>> instead
+   of looping on them.
+8. ONLY give up if, after your fix, re-running the SAME command returns the EXACT same
    errors with no change (you are stuck). Then briefly explain what is blocking you and
    output <<<DONE>>>.
-8. Do NOT output <<<DONE>>> while there are still fixable errors or unfinished work.
-9. Keep each turn focused; rely on the [OBSERVATIONS] you receive to decide the next step.
+9. Do NOT output <<<DONE>>> while there are still fixable errors or unfinished work.
+10. Keep each turn focused; rely on the [OBSERVATIONS] you receive to decide the next step.
 `;
 
   getAgentSystemPrompt(): string {
