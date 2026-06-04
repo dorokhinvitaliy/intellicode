@@ -4,10 +4,11 @@ import * as path from 'path';
 import * as cp from 'child_process';
 
 export interface FileOperation {
-  type: 'create' | 'edit' | 'delete' | 'execute';
+  type: 'create' | 'edit' | 'delete' | 'execute' | 'patch';
   filePath?: string;
   content?: string;
   command?: string;
+  patches?: { search: string; replace: string }[];
   description: string;
 }
 
@@ -110,6 +111,29 @@ export class FileOperationsHandler {
       });
     }
 
+    // APPLY_PATCH — surgical edits via SEARCH/REPLACE blocks (no full rewrite)
+    const patchRegex = /<<<\s*APPLY_PATCH\s+path="([^"]+)"\s*>{1,}([\s\S]*?)<<<\s*END_PATCH\s*>{1,}/gi;
+    while ((match = patchRegex.exec(response)) !== null) {
+      const fp = match[1];
+      const body = match[2];
+      const patches: { search: string; replace: string }[] = [];
+      const pairRe = /<<<\s*SEARCH\s*>{1,}([\s\S]*?)<<<\s*REPLACE\s*>{1,}([\s\S]*?)(?=<<<\s*SEARCH\s*>{1,}|$)/gi;
+      let pm;
+      while ((pm = pairRe.exec(body)) !== null) {
+        const search = this.trimPatchBlock(pm[1]);
+        const replace = this.trimPatchBlock(pm[2]);
+        if (search.length > 0) { patches.push({ search, replace }); }
+      }
+      if (patches.length > 0) {
+        operations.push({
+          type: 'patch',
+          filePath: fp,
+          patches,
+          description: `Точечные правки: ${fp}`,
+        });
+      }
+    }
+
     // Fallback: if no explicit CREATE/EDIT/EXECUTE operations found,
     // and the AI is NOT actively using a READ_FILE marker (which means it knows about markers
     // and is just investigating before editing in the next loop), parse code blocks.
@@ -131,6 +155,11 @@ export class FileOperationsHandler {
     // Remove closing fence: ```
     cleaned = cleaned.replace(/\n?```\s*$/, '');
     return cleaned.trim();
+  }
+
+  /** Strip the single leading/trailing newline that framing adds around a block. */
+  private trimPatchBlock(s: string): string {
+    return s.replace(/^\r?\n/, '').replace(/\r?\n[ \t]*$/, '');
   }
 
   /**
@@ -196,6 +225,8 @@ export class FileOperationsHandler {
       case 'create':
       case 'edit':
         return this.createOrEditFileDirect(operation);
+      case 'patch':
+        return this.patchFileDirect(operation);
       case 'delete':
         return this.deleteFileDirect(operation);
       case 'execute':
@@ -215,6 +246,8 @@ export class FileOperationsHandler {
       case 'create':
       case 'edit':
         return this.createOrEditFileDirect(operation);
+      case 'patch':
+        return this.patchFileDirect(operation);
       case 'delete':
         return this.deleteFileDirect(operation);
       case 'execute':
@@ -249,6 +282,52 @@ export class FileOperationsHandler {
       await vscode.window.showTextDocument(doc);
 
       return { success: true, message: `Файл ${exists ? 'отредактирован' : 'создан'}: ${op.filePath}` };
+    } catch (err: unknown) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      return { success: false, message: `Ошибка: ${errMsg}` };
+    }
+  }
+
+  /** Apply surgical SEARCH/REPLACE edits to a file without rewriting it whole. */
+  private async patchFileDirect(op: FileOperation): Promise<OperationResult> {
+    if (!op.filePath || !op.patches || op.patches.length === 0) {
+      return { success: false, message: 'Пустой патч' };
+    }
+
+    const rootPath = this.getWorkspaceRoot();
+    if (!rootPath) {
+      return { success: false, message: 'Рабочая папка не открыта' };
+    }
+
+    const fullPath = this.resolveFilePath(op.filePath, rootPath);
+    if (!fs.existsSync(fullPath)) {
+      return { success: false, message: `Файл не найден: ${op.filePath}` };
+    }
+
+    try {
+      let content = fs.readFileSync(fullPath, 'utf-8');
+      let applied = 0;
+
+      for (const p of op.patches) {
+        const idx = content.indexOf(p.search);
+        if (idx === -1) {
+          const snippet = p.search.replace(/\s+/g, ' ').slice(0, 60);
+          return {
+            success: false,
+            message: `Фрагмент не найден в ${op.filePath} (блок ${applied + 1}: "${snippet}…"). Перечитайте файл и повторите с точным текстом.`,
+          };
+        }
+        content = content.slice(0, idx) + p.replace + content.slice(idx + p.search.length);
+        applied++;
+      }
+
+      fs.writeFileSync(fullPath, content, 'utf-8');
+      try {
+        const doc = await vscode.workspace.openTextDocument(fullPath);
+        await vscode.window.showTextDocument(doc);
+      } catch { /* ignore */ }
+
+      return { success: true, message: `Файл обновлён (${applied} правок): ${op.filePath}` };
     } catch (err: unknown) {
       const errMsg = err instanceof Error ? err.message : String(err);
       return { success: false, message: `Ошибка: ${errMsg}` };

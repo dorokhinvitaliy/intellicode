@@ -301,6 +301,16 @@ Extra tools available in agent mode:
 LIST FILES in a directory (recursive):
 <<<LIST_DIR path="relative/dir"/>>>
 
+SURGICAL EDIT of an existing file — change only what's needed, do NOT rewrite the
+whole file. Use exact SEARCH text copied from the file; you may include several
+SEARCH/REPLACE pairs in one block:
+<<<APPLY_PATCH path="relative/path">>>
+<<<SEARCH>>>
+exact existing lines to find
+<<<REPLACE>>>
+new lines to put in their place
+<<<END_PATCH>>>
+
 SIGNAL COMPLETION (only when the ENTIRE task is done):
 <<<DONE>>>
 followed by a short summary of what was done.
@@ -309,11 +319,16 @@ Agent rules:
 1. For tasks over "all" / "every" files (e.g. "cover all UI components with tests"),
    FIRST use LIST_DIR to discover the files, THEN process each one.
 2. You may emit MANY markers in a single turn (e.g. create several test files at once).
-3. ALWAYS READ a file before you EDIT it.
-4. After writing code/tests you MAY run the relevant command (test runner, build)
-   via EXECUTE to verify the result, then fix failures.
-5. Do NOT output <<<DONE>>> until every required file and action is complete.
-6. Keep each turn focused; rely on the [OBSERVATIONS] you receive to decide the next step.
+3. To MODIFY an existing file, PREFER <<<APPLY_PATCH>>> with minimal SEARCH/REPLACE
+   blocks. Use CREATE_FILE only for NEW files. Use EDIT_FILE only when you truly need
+   to replace the whole content of a small file.
+4. ALWAYS READ a file before you patch or edit it, so SEARCH matches the file exactly.
+5. After writing code/tests you MAY run the relevant command (test runner, build)
+   via EXECUTE to verify, then fix failures.
+6. If a command FAILS twice with essentially the same error, STOP retrying it —
+   briefly explain the problem and output <<<DONE>>>. Never loop on the same failing command.
+7. Do NOT output <<<DONE>>> until every required file and action is complete.
+8. Keep each turn focused; rely on the [OBSERVATIONS] you receive to decide the next step.
 `;
 
   getAgentSystemPrompt(): string {
