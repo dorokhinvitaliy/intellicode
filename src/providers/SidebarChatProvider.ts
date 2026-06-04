@@ -454,6 +454,8 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
     const rootPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
     let opCount = 0;
     let actionId = 0;
+    let lastFailedCmd = '';
+    let sameFailCount = 0;
     const affected: { path: string; kind: string }[] = [];
 
     try {
@@ -535,13 +537,33 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
           }
           observations.push(line);
 
-          if (res.success && op.filePath && (op.type === 'create' || op.type === 'edit' || op.type === 'delete')) {
-            affected.push({ path: op.filePath, kind: op.type });
+          // Loop guard: stop if the same command keeps failing
+          if (op.type === 'execute') {
+            if (!res.success) {
+              sameFailCount = op.command === lastFailedCmd ? sameFailCount + 1 : 1;
+              lastFailedCmd = op.command || '';
+            } else if (op.command === lastFailedCmd) {
+              sameFailCount = 0;
+              lastFailedCmd = '';
+            }
+          }
+
+          if (res.success && op.filePath && (op.type === 'create' || op.type === 'edit' || op.type === 'patch' || op.type === 'delete')) {
+            affected.push({ path: op.filePath, kind: op.type === 'patch' ? 'edit' : op.type });
           }
           // Re-index created/edited files so later steps see them
           if (res.success && op.filePath && op.type !== 'delete') {
             await this.indexer.indexFile(path.join(rootPath, op.filePath)).catch(() => { });
           }
+        }
+
+        // Loop guard: a command that fails repeatedly → stop instead of spinning forever
+        if (sameFailCount >= 2) {
+          this.postMessageToWebview({
+            type: 'error',
+            message: `Команда «${lastFailedCmd}» повторно завершается с ошибкой — агент остановлен, чтобы не зациклиться.`,
+          });
+          break;
         }
 
         // Stop after executing this turn's actions if the model signalled completion,
@@ -1520,6 +1542,10 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
       var SL = String.fromCharCode(92) + '/'; // \/ for regex
       // CREATE_FILE and EDIT_FILE blocks (with content)
       text = text.replace(new RegExp(L + '{1,}' + S + '*(?:CREATE|EDIT)_FILE' + S + '+path="[^"]*"' + S + '*' + R + '{2,}[' + S + SS + ']*?(?:' + L + '{1,}' + S + '*(?:END_FILE|/(?:CREATE|EDIT)_FILE)' + S + '*' + R + '{2,}|$)', 'gi'), '');
+      // APPLY_PATCH blocks (with SEARCH/REPLACE content)
+      text = text.replace(new RegExp(L + '{1,}' + S + '*APPLY_PATCH' + S + '+path="[^"]*"' + S + '*' + R + '{2,}[' + S + SS + ']*?(?:' + L + '{1,}' + S + '*END_PATCH' + S + '*' + R + '{1,}|$)', 'gi'), '');
+      // Stray SEARCH / REPLACE / END_PATCH markers
+      text = text.replace(new RegExp(L + '{1,}' + S + '*(?:SEARCH|REPLACE|END_PATCH)' + S + '*' + R + '{1,}', 'gi'), '');
       // DELETE_FILE
       text = text.replace(new RegExp(L + '{1,}' + S + '*DELETE_FILE' + S + '+path="[^"]*"' + S + '*' + SL + '?' + S + '*' + R + '{1,}', 'gi'), '');
       // EXECUTE
@@ -1674,6 +1700,7 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
         case 'list':    return { verb: 'Read folder',  icon: ICON_FOLDER };
         case 'create':  return { verb: 'Created file', icon: ICON_FILE_PLUS };
         case 'edit':    return { verb: 'Edited file',  icon: ICON_PENCIL };
+        case 'patch':   return { verb: 'Edited file',  icon: ICON_PENCIL };
         case 'delete':  return { verb: 'Deleted file', icon: ICON_TRASH };
         case 'execute': return { verb: 'Ran',          icon: ICON_TERMINAL };
         default:        return { verb: kind,           icon: ICON_FILE };
