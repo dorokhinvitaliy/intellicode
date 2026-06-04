@@ -474,23 +474,31 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
     let endedCleanly = false;
     const affected: { path: string; kind: string }[] = [];
     const readFiles = new Set<string>();
+    const doneLog: string[] = [];
 
     try {
       const { context } = await this.chatHandler.buildAgentContext(task);
       const configContext = this.getProjectConfigContext();
 
+      // The task message is "pinned" (never trimmed) and carries a running progress
+      // log so the agent never forgets what it already did and never restarts the task.
+      const taskBase = `TASK: ${task}${configContext}\n\nPROJECT CONTEXT:\n${context}`;
       const messages: ChatMessage[] = [
         { role: 'system', content: this.chatHandler.getAgentSystemPrompt() },
-        {
-          role: 'user',
-          content: `TASK: ${task}${configContext}\n\nPROJECT CONTEXT:\n${context}`,
-        },
+        { role: 'user', content: taskBase },
       ];
 
       for (let step = 0; step < SidebarChatProvider.AGENT_MAX_STEPS; step++) {
         if (signal.aborted) { break; }
 
         this.trimAgentMessages(messages);
+
+        // Refresh the pinned progress log so completed work is never re-done.
+        if (doneLog.length > 0) {
+          messages[1].content = taskBase +
+            `\n\n[ALREADY DONE — do NOT repeat or re-create these. Continue ONLY with the remaining work, then output <<<DONE>>>]\n` +
+            doneLog.slice(-50).map(d => '- ' + d).join('\n');
+        }
 
         // Begin a fresh assistant turn (bubble is created lazily on first token)
         this.postMessageToWebview({ type: 'agentTurn' });
@@ -590,6 +598,16 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
             affected.push({ path: op.filePath, kind: op.type === 'patch' ? 'edit' : op.type });
             editsThisStep++;
             readFiles.delete(op.filePath); // content changed → allow a fresh read
+          }
+
+          // Running progress log (deduped) so the agent never re-does completed work.
+          if (res.success) {
+            let entry = '';
+            if (op.type === 'create') { entry = 'Created file ' + op.filePath; }
+            else if (op.type === 'edit' || op.type === 'patch') { entry = 'Edited file ' + op.filePath; }
+            else if (op.type === 'delete') { entry = 'Deleted file ' + op.filePath; }
+            else if (op.type === 'execute') { entry = 'Ran `' + op.command + '` (passed)'; }
+            if (entry && !doneLog.includes(entry)) { doneLog.push(entry); }
           }
           // Re-index created/edited files so later steps see them
           if (res.success && op.filePath && op.type !== 'delete') {
@@ -691,7 +709,7 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
 
   /** Keep the agent transcript bounded: system + task + most recent turns. */
   private trimAgentMessages(messages: ChatMessage[]): void {
-    const MAX = 14;
+    const MAX = 20;
     if (messages.length <= MAX) { return; }
     const head = messages.slice(0, 2);
     const tail = messages.slice(-(MAX - 2));

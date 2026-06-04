@@ -316,6 +316,9 @@ SIGNAL COMPLETION (only when the ENTIRE task is done):
 followed by a short summary of what was done.
 
 Agent rules:
+0. Before acting EVERY turn, check the "[ALREADY DONE]" list in the task message.
+   NEVER re-discover, re-create or re-do anything already listed there — continue only
+   with the REMAINING work. When nothing remains, output <<<DONE>>>.
 1. For tasks over "all" / "every" files (e.g. "cover all UI components with tests"),
    FIRST use LIST_DIR to discover the files, THEN process each one.
 2. You may emit MANY markers in a single turn (e.g. create several test files at once).
