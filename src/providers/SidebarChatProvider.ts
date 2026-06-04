@@ -469,9 +469,11 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
     let lastFailSig = '';
     let stallCount = 0;
     let emptyStreak = 0;
-    let editsSinceLastCmd = 0;
+    let lastStepSig = '';
+    let noProgress = 0;
     let endedCleanly = false;
     const affected: { path: string; kind: string }[] = [];
+    const readFiles = new Set<string>();
 
     try {
       const { context } = await this.chatHandler.buildAgentContext(task);
@@ -506,18 +508,26 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
         const done = /<<<\s*DONE\s*>>>/i.test(actionable);
 
         const observations: string[] = [];
-        let pointlessRerun = false;
+        const sigParts: string[] = [];
+        let editsThisStep = 0;
 
         // LIST_DIR — file discovery
         for (const dir of this.parseListDirOps(actionable)) {
           this.postMessageToWebview({ type: 'agentAction', action: { id: ++actionId, kind: 'list', target: dir, status: 'success' } });
           observations.push(`LIST_DIR ${dir}:\n${this.listDirForAgent(dir, rootPath)}`);
+          sigParts.push('list:' + dir);
         }
 
-        // READ_FILE
+        // READ_FILE — avoid re-dumping a file already read with no changes since
         for (const p of this.parseReadFileOps(actionable)) {
           this.postMessageToWebview({ type: 'agentAction', action: { id: ++actionId, kind: 'read', target: p, status: 'success' } });
-          observations.push(this.readFileForAgent(p, rootPath));
+          if (readFiles.has(p)) {
+            observations.push(`READ_FILE ${p}: (you already read this file — its content is above. Do NOT read it again; make the necessary edits now with APPLY_PATCH.)`);
+          } else {
+            readFiles.add(p);
+            observations.push(this.readFileForAgent(p, rootPath));
+          }
+          sigParts.push('read:' + p);
         }
 
         // CREATE / EDIT / DELETE / EXECUTE — strict (no code-block fallback)
@@ -561,24 +571,25 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
           }
           observations.push(line);
 
-          // Progress tracking: distinguish "trying but failing" from "pointlessly re-running".
+          // Build a signature of this action for no-progress detection.
           if (op.type === 'execute') {
+            const outSig = this.normalizeOutput((op.command || '') + '\n' + (res.output || ''));
+            sigParts.push('exec:' + outSig);
             if (!res.success) {
-              const sig = this.normalizeOutput((op.command || '') + '\n' + (res.output || ''));
-              // Same command + same output AND nothing was edited since the last run = pure no-op loop.
-              if (sig === lastFailSig && editsSinceLastCmd === 0) { pointlessRerun = true; }
-              stallCount = sig === lastFailSig ? stallCount + 1 : 1;
-              lastFailSig = sig;
+              stallCount = outSig === lastFailSig ? stallCount + 1 : 1;
+              lastFailSig = outSig;
             } else {
               stallCount = 0;
               lastFailSig = '';
             }
-            editsSinceLastCmd = 0;
+          } else {
+            sigParts.push(op.type + ':' + target + ':' + (res.success ? 'ok' : 'fail'));
           }
 
           if (res.success && op.filePath && (op.type === 'create' || op.type === 'edit' || op.type === 'patch' || op.type === 'delete')) {
             affected.push({ path: op.filePath, kind: op.type === 'patch' ? 'edit' : op.type });
-            editsSinceLastCmd++;
+            editsThisStep++;
+            readFiles.delete(op.filePath); // content changed → allow a fresh read
           }
           // Re-index created/edited files so later steps see them
           if (res.success && op.filePath && op.type !== 'delete') {
@@ -601,18 +612,27 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
         }
         emptyStreak = 0;
 
-        // Pointless re-run: the agent re-ran the SAME command with the SAME output and
-        // made NO code changes since the last run. Re-running cannot help → stop the loop.
-        if (pointlessRerun) {
+        // No-progress detection (covers reads, lists, re-runs): the agent repeated the
+        // SAME actions as the previous turn and changed NO file. Re-doing them is pointless.
+        const stepSig = sigParts.slice().sort().join('|');
+        if (editsThisStep === 0 && stepSig && stepSig === lastStepSig) {
+          noProgress++;
+        } else {
+          noProgress = 0;
+        }
+        lastStepSig = stepSig;
+
+        // Stop if the agent keeps repeating identical actions without changing anything.
+        if (noProgress >= 2) {
           this.postMessageToWebview({
             type: 'agentNotice',
-            text: 'Команда перезапускается без изменений в коде и даёт тот же результат. Похоже, это предупреждения/проблемы, которые не относятся к задаче или требуют вашего решения — останавливаюсь, чтобы не крутиться впустую.',
+            text: 'Повторяю одни и те же действия (чтение/команда) без изменений в коде — останавливаюсь, чтобы не крутиться впустую. Напишите «продолжай», чтобы я попробовал иначе.',
           });
           endedCleanly = true;
           break;
         }
 
-        // Severe-stall backstop: same errors with zero change many times, even while editing.
+        // Severe-stall backstop: a command keeps returning identical errors many times.
         if (stallCount >= 6) {
           this.postMessageToWebview({
             type: 'agentNotice',
@@ -622,9 +642,11 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
           break;
         }
 
-        // Soft stall: nudge toward a different approach, but keep going.
-        if (stallCount >= 2) {
-          observations.push('NOTE: the previous command returned the SAME errors as before — your last change did not affect them. Do NOT repeat the same edit or re-run the command unchanged. Inspect the exact failing lines and try a DIFFERENT fix, or finish if these issues are unrelated to the task.');
+        // Soft nudge: one repeated no-progress turn, or a command stalling → push to act differently.
+        if (noProgress >= 1) {
+          observations.push('NOTE: you just repeated the same actions (e.g. re-reading a file) without changing any code. You already have what you need — STOP inspecting and make the actual edits now with APPLY_PATCH, or output <<<DONE>>> if the task is complete.');
+        } else if (stallCount >= 2) {
+          observations.push('NOTE: the previous command returned the SAME errors as before — your last change did not affect them. Do NOT repeat the same edit or re-run the command unchanged. Try a DIFFERENT fix, or finish if these issues are unrelated to the task.');
         }
 
         messages.push({
