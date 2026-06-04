@@ -475,6 +475,7 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
     const affected: { path: string; kind: string }[] = [];
     const readFiles = new Set<string>();
     const doneLog: string[] = [];
+    let pinnedListing = '';
 
     try {
       const { context } = await this.chatHandler.buildAgentContext(task);
@@ -493,12 +494,18 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
 
         this.trimAgentMessages(messages);
 
-        // Refresh the pinned progress log so completed work is never re-done.
-        if (doneLog.length > 0) {
-          messages[1].content = taskBase +
-            `\n\n[ALREADY DONE — do NOT repeat or re-create these. Continue ONLY with the remaining work, then output <<<DONE>>>]\n` +
-            doneLog.slice(-50).map(d => '- ' + d).join('\n');
+        // Refresh the pinned task message: worklist (from LIST_DIR) + progress log.
+        // This is never trimmed, so the agent always knows the full set of files and
+        // what is already done — it never forgets or restarts the task.
+        let pinned = taskBase;
+        if (pinnedListing) {
+          pinned += `\n\n[FILES IN SCOPE — discovered earlier, use this list, do NOT run LIST_DIR again]\n${pinnedListing.slice(0, 2500)}`;
         }
+        if (doneLog.length > 0) {
+          pinned += `\n\n[ALREADY DONE — do NOT repeat or re-create these. Work through the REMAINING files only, then output <<<DONE>>>]\n` +
+            doneLog.slice(-60).map(d => '- ' + d).join('\n');
+        }
+        messages[1].content = pinned;
 
         // Begin a fresh assistant turn (bubble is created lazily on first token)
         this.postMessageToWebview({ type: 'agentTurn' });
@@ -522,7 +529,10 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
         // LIST_DIR — file discovery
         for (const dir of this.parseListDirOps(actionable)) {
           this.postMessageToWebview({ type: 'agentAction', action: { id: ++actionId, kind: 'list', target: dir, status: 'success' } });
-          observations.push(`LIST_DIR ${dir}:\n${this.listDirForAgent(dir, rootPath)}`);
+          const listing = this.listDirForAgent(dir, rootPath);
+          observations.push(`LIST_DIR ${dir}:\n${listing}`);
+          // Pin the worklist so the agent never has to re-list (and never forgets the files)
+          pinnedListing = `${dir}:\n${listing}`;
           sigParts.push('list:' + dir);
         }
 
@@ -640,11 +650,11 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
         }
         lastStepSig = stepSig;
 
-        // Stop if the agent keeps repeating identical actions without changing anything.
-        if (noProgress >= 2) {
+        // Stop only when the agent is GENUINELY stuck: many identical no-edit turns in a row.
+        if (noProgress >= 4) {
           this.postMessageToWebview({
             type: 'agentNotice',
-            text: 'Повторяю одни и те же действия (чтение/команда) без изменений в коде — останавливаюсь, чтобы не крутиться впустую. Напишите «продолжай», чтобы я попробовал иначе.',
+            text: 'Повторяю одни и те же действия без изменений в коде несколько раз подряд — останавливаюсь, чтобы не крутиться впустую. Напишите «продолжай», чтобы я попробовал иначе.',
           });
           endedCleanly = true;
           break;
@@ -660,9 +670,9 @@ export class SidebarChatProvider implements vscode.WebviewViewProvider {
           break;
         }
 
-        // Soft nudge: one repeated no-progress turn, or a command stalling → push to act differently.
-        if (noProgress >= 1) {
-          observations.push('NOTE: you just repeated the same actions (e.g. re-reading a file) without changing any code. You already have what you need — STOP inspecting and make the actual edits now with APPLY_PATCH, or output <<<DONE>>> if the task is complete.');
+        // Soft nudge: repeated no-progress turns, or a command stalling → push to act/continue.
+        if (noProgress >= 2) {
+          observations.push('NOTE: you repeated the same actions without changing any code. The files in scope and what is already done are listed in the task message above — STOP re-inspecting and either create/edit the REMAINING files now (APPLY_PATCH / CREATE_FILE), or output <<<DONE>>> if everything is finished.');
         } else if (stallCount >= 2) {
           observations.push('NOTE: the previous command returned the SAME errors as before — your last change did not affect them. Do NOT repeat the same edit or re-run the command unchanged. Try a DIFFERENT fix, or finish if these issues are unrelated to the task.');
         }
